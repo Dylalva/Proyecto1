@@ -1,0 +1,26 @@
+# Ignorar los archivos de compilación
+*.o
+*.a
+*.so
+*.out
+*.exe
+
+# Ignorar los directorios de construcción
+build/
+bin/
+obj/
+
+# Ignorar el archivo de configuración de VS Code
+.vscode/
+
+# Ignorar archivos de sistema de Linux
+.DS_Store
+*~
+
+# Ignorar archivos de depuración y logs
+*.log
+*.gdb
+
+# Ignorar archivos temporales de editor
+*.swp
+*.swo
