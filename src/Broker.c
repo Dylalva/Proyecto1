@@ -82,6 +82,22 @@ typedef struct {
     char mensaje[256];
 } Mensaje;
 
+
+// Función para imprimir y enviar mensaje al socket del consumer
+/*
+// Función para enviar un mensaje al cliente
+void enviarMensaje(int socket_cliente, Mensaje *msg) {
+    if (send(socket_cliente, msg, sizeof(Mensaje), 0) < 0) {
+        perror("Error al enviar el mensaje");
+    } else {
+        printf("Mensaje enviado al cliente:\n");
+        printf("  ID: %d\n", msg->id);
+        printf("  Origen: %s\n", msg->origen);
+        printf("  Contenido: %s\n", msg->mensaje);
+    }
+}
+*/
+
 // -------------------------
 // Implementación del Servidor con Cola
 // -------------------------
@@ -152,6 +168,14 @@ int main() {
             enqueue(cola, msg_ptr);
         }
 
+        // Enviar un mensaje de prueba al consumer (descomentar para probar)
+        /*
+        msg.id = 1; // ID del mensaje
+        strcpy(msg.origen, "Servidor"); // Origen del mensaje
+        strcpy(msg.mensaje, "Hola desde el servidor"); // Contenido del mensaje
+        enviarMensaje(nueva_conexion, &msg);
+        */
+
         close(nueva_conexion);
 
         // Imprimir el contenido actual de la cola para la prueba
@@ -163,6 +187,7 @@ int main() {
             actual = actual->next;
         }
         printf("\n");
+        
     }
 
     // Liberar la memoria de la cola (aunque en este ejemplo el ciclo es infinito)
