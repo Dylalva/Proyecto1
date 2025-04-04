@@ -24,3 +24,5 @@ obj/
 # Ignorar archivos temporales de editor
 *.swp
 *.swo
+src/Broker
+src/Producer
