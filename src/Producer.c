@@ -2,7 +2,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <netdb.h>
 #include <arpa/inet.h>
+#include <sys/types.h>
+#include <sys/socket.h>
 
 // Definición de la estructura del mensaje
 typedef struct {
@@ -11,14 +14,40 @@ typedef struct {
     char mensaje[256];
 } Mensaje;
 
+void obtener_identificador(char *identificador, size_t size) {
+    char hostname[256];
+    struct hostent *host_entry;
+    char *ip;
+    pid_t pid = getpid();
+
+    // Obtener nombre del host
+    if (gethostname(hostname, sizeof(hostname)) == -1) {
+        perror("gethostname");
+        exit(EXIT_FAILURE);
+    }
+
+    // Obtener IP asociada al nombre del host
+    host_entry = gethostbyname(hostname);
+    if (host_entry == NULL) {
+        perror("gethostbyname");
+        exit(EXIT_FAILURE);
+    }
+
+    ip = inet_ntoa(*((struct in_addr*)host_entry->h_addr_list[0]));
+
+    // Combinar IP y PID como identificador
+    snprintf(identificador, size, "%s-%d", ip, pid);
+}
+
 int main() {
     int socket_fd;
     struct sockaddr_in servidor;
     Mensaje msg;
-
+    char identificador[64];
+    obtener_identificador(identificador, sizeof(identificador));
     // Inicializar el mensaje a enviar
     msg.id = 1;
-    strcpy(msg.origen, "Productor_1");
+    strcpy(msg.origen, identificador);
     strcpy(msg.mensaje, "Hola, este es un mensaje de prueba!");
 
     // Crear el socket TCP

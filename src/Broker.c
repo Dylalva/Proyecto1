@@ -107,6 +107,7 @@ int main() {
     struct sockaddr_in direccion_servidor, direccion_cliente;
     socklen_t tam_cliente = sizeof(direccion_cliente);
     Mensaje msg;
+    int id = 0;
 
     // Inicializar la cola
     Queue *cola = initQueue();
@@ -149,6 +150,7 @@ int main() {
 
         // Recibir el mensaje
         size_t bytes_recibidos = recv(nueva_conexion, &msg, sizeof(Mensaje), 0);
+        msg.id = id++;
         if (bytes_recibidos <= 0) {
             perror("Error al recibir mensaje o conexión cerrada");
         } else {
