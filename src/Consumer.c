@@ -10,21 +10,21 @@
 #include <errno.h>
 
 // -------------------------
-// Archivos
+// Configuraciones
 // -------------------------
-#define MAX_GROUP_ID_LEN   200  // Longitud máxima permitida para group_id
-#define MAX_FILENAME_LEN   256  // Tamaño máximo para nombres de archivo
+#define MAX_FILENAME_LEN   256
 #define MAX_TMPFILE_LEN    (MAX_FILENAME_LEN + 4)  // + .tmp
+#define QUEUE_CAPACITY     100
+#define SOCKET_TIMEOUT_SEC 2
 
 // -------------------------
 // Estructuras de Datos
 // -------------------------
-
 typedef struct {
     long offset;
     int id;
     char origen[50];
-    char Message[256];
+    char message[256];
 } Message;
 
 typedef struct Node {    
@@ -43,14 +43,12 @@ typedef struct {
     int socket_cliente;
     Queue *cola;
     long current_offset;
-    char group_id[50];
     pthread_mutex_t offset_mutex;
 } ConsumerContext;
 
 // -------------------------
 // Funciones de la Cola
 // -------------------------
-
 Queue *initQueue() {    
     Queue *queue = malloc(sizeof(Queue));    
     queue->front = NULL;    
@@ -97,10 +95,8 @@ void *dequeue(Queue *queue) {
 // -------------------------
 // Funciones de Persistencia
 // -------------------------
-
-long cargar_offset(const char* group_id) {
-    char filename[256];
-    snprintf(filename, sizeof(filename), "offset_%s.log", group_id);
+long cargar_offset() {
+    const char* filename = "offset.log";
     
     FILE* file = fopen(filename, "r");
     if (!file) {
@@ -117,7 +113,7 @@ long cargar_offset(const char* group_id) {
     
     long offset = 0;
     if (fscanf(file, "%ld", &offset) != 1) {
-        fprintf(stderr, "Error leyendo offset de %s\n", filename);
+        fprintf(stderr, "Error leyendo offset\n");
     }
     
     flock(fileno(file), LOCK_UN);
@@ -125,43 +121,26 @@ long cargar_offset(const char* group_id) {
     return offset;
 }
 
-void guardar_offset(const char* group_id, long offset) {
-    char filename[MAX_FILENAME_LEN];
-    char tmpfile[MAX_TMPFILE_LEN];
-    int written;
-    
-    // 1. Generar nombres de archivo
-    written = snprintf(filename, sizeof(filename), 
-                      "offset_%.*s.log", 
-                      MAX_GROUP_ID_LEN, 
-                      group_id);
-    
-    if (written >= sizeof(filename)) {
-        fprintf(stderr, "Advertencia: group_id truncado\n");
-    }
-    
-    written = snprintf(tmpfile, sizeof(tmpfile), "%s.tmp", filename);
-    if (written >= sizeof(tmpfile)) {
-        fprintf(stderr, "Error: Nombre temporal demasiado largo\n");
-        return;
-    }
+void guardar_offset(long offset) {
+    const char* filename = "offset.log";
+    const char* tmpfile = "offset.tmp";
 
-    // 2. Crear archivo temporal
+    // Crear archivo temporal
     FILE* file = fopen(tmpfile, "w");
     if (!file) {
         perror("Error creando archivo temporal");
         return;
     }
 
-    // 3. Escribir el offset
+    // Escribir el offset
     if (fprintf(file, "%ld", offset) < 0) {
         perror("Error escribiendo offset");
         fclose(file);
-        remove(tmpfile); // Limpiar archivo temporal
+        remove(tmpfile);
         return;
     }
 
-    // 4. Forzar escritura a disco
+    // Forzar escritura a disco
     if (fflush(file) != 0) {
         perror("Error sincronizando datos");
         fclose(file);
@@ -169,21 +148,21 @@ void guardar_offset(const char* group_id, long offset) {
         return;
     }
 
-    // 5. Cerrar archivo
+    // Cerrar archivo
     if (fclose(file) != 0) {
         perror("Error cerrando archivo temporal");
         remove(tmpfile);
         return;
     }
 
-    // 6. Renombrar atómicamente
+    // Renombrar atómicamente
     if (rename(tmpfile, filename) != 0) {
         perror("Error renombrando archivo");
-        remove(tmpfile); // Limpiar residual
+        remove(tmpfile);
         return;
     }
 
-    // 7. Sincronizar directorio (para sistemas críticos)
+    // Sincronizar directorio
     int dirfd = open(".", O_RDONLY);
     fsync(dirfd);
     close(dirfd);
@@ -192,7 +171,6 @@ void guardar_offset(const char* group_id, long offset) {
 // -------------------------
 // Hilos de Trabajo
 // -------------------------
-  
 void *receiver_thread(void *arg) {
     ConsumerContext *ctx = (ConsumerContext *)arg;
     Message msg;
@@ -226,12 +204,12 @@ void *processor_thread(void *arg) {
     while (1) {
         Message *msg = dequeue(ctx->cola);
         if (msg) {
-            printf("\n[Grupo: %s][Offset: %ld] Origen: %s\nMessage: %s\n", 
-                  ctx->group_id, msg->offset, msg->origen, msg->Message);
+            printf("\n[Offset: %ld] Origen: %s\nMessage: %s\n", 
+                  msg->offset, msg->origen, msg->message);
             
             pthread_mutex_lock(&ctx->offset_mutex);
             ctx->current_offset = msg->offset + 1;
-            guardar_offset(ctx->group_id, ctx->current_offset);
+            guardar_offset(ctx->current_offset);
             
             char ack_msg[64];
             snprintf(ack_msg, sizeof(ack_msg), "ACK=%ld", msg->offset);
@@ -248,23 +226,12 @@ void *processor_thread(void *arg) {
 // -------------------------
 // Configuración Principal
 // -------------------------
-
 int main(int argc, char *argv[]) {
-    if (argc != 3) {
-        printf("Uso: %s <grupo> <offset_inicial>\n", argv[0]);
-        exit(EXIT_FAILURE);
-    }
 
     ConsumerContext ctx;
-    strncpy(ctx.group_id, argv[1], sizeof(ctx.group_id));
-   
     
-    // Cargar offset desde archivo si no se especifica
-    if (strcmp(argv[2], "auto") == 0) {
-        ctx.current_offset = cargar_offset(ctx.group_id);
-    } else {
-        ctx.current_offset = atol(argv[2]);
-    }
+    // Cargar offset desde archivo, si no existe, se inicializa en 0
+    ctx.current_offset = cargar_offset();
 
     ctx.cola = initQueue();
     pthread_mutex_init(&ctx.offset_mutex, NULL);
@@ -274,7 +241,7 @@ int main(int argc, char *argv[]) {
     struct sockaddr_in broker_addr = {
         .sin_family = AF_INET,
         .sin_port = htons(8080),
-        .sin_addr.s_addr = INADDR_ANY
+        .sin_addr.s_addr = inet_addr("127.0.0.1")
     };
     
     // Conexión
@@ -284,9 +251,7 @@ int main(int argc, char *argv[]) {
     }
     
     // Registro inicial
-    char init_msg[256];
-    snprintf(init_msg, sizeof(init_msg), "GROUP=%s;OFFSET=%ld", ctx.group_id, ctx.current_offset);
-    send(ctx.socket_cliente, init_msg, strlen(init_msg), 0);
+    send(ctx.socket_cliente, "REGISTER", 8, 0);
 
     // Hilos
     pthread_t t_receiver, t_processor;
@@ -298,7 +263,7 @@ int main(int argc, char *argv[]) {
 
     // Limpieza
     pthread_mutex_destroy(&ctx.offset_mutex);
-    free(ctx.cola->front); // Liberar memoria residual
+    free(ctx.cola->front);
     free(ctx.cola);
     close(ctx.socket_cliente);
 
