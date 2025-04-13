@@ -12,7 +12,6 @@
 #include <errno.h>
 #include <sys/time.h>  // Para struct timeval
 #include <signal.h>    // Para manejo de señales
-#include <time.h>      // Para usleep
 
 
 // -------------------------
@@ -302,8 +301,8 @@ int main(int argc, char *argv[]) {
     ctx.socket_cliente = socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in broker_addr = {
         .sin_family = AF_INET,
-        .sin_port = htons(8082),
-        .sin_addr.s_addr = inet_addr("127.0.0.1")
+        .sin_port = htons(8000),
+        .sin_addr.s_addr = INADDR_ANY
     };
     
     if (connect(ctx.socket_cliente, (struct sockaddr*)&broker_addr, sizeof(broker_addr)) < 0) {
