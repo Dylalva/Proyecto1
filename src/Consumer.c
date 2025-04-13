@@ -3,295 +3,304 @@
 #include <string.h>
 #include <unistd.h>
 #include <arpa/inet.h>
-#include <fcntl.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-#include <errno.h>
-#include <sys/select.h>
 #include <pthread.h>
+#include <sys/file.h>
+#include <errno.h>
 
-/*// Nodo de la cola
+// -------------------------
+// Archivos
+// -------------------------
+#define MAX_GROUP_ID_LEN   200  // Longitud máxima permitida para group_id
+#define MAX_FILENAME_LEN   256  // Tamaño máximo para nombres de archivo
+#define MAX_TMPFILE_LEN    (MAX_FILENAME_LEN + 4)  // + .tmp
+
+// -------------------------
+// Estructuras de Datos
+// -------------------------
+
+typedef struct {
+    long offset;
+    int id;
+    char origen[50];
+    char Message[256];
+} Message;
+
 typedef struct Node {    
-    void *data;             // Puntero genérico para almacenar cualquier tipo de dato    
-    struct Node *next;      // Puntero al siguiente nodo
+    void *data;    
+    struct Node *next;    
 } Node;
 
-// Estructura de la cola
 typedef struct Queue {    
-    Node *front;            // Puntero al frente de la cola    
-    Node *rear;             // Puntero al final de la cola    
-    int size;               // Tamaño actual de la cola
+    Node *front;    
+    Node *rear;    
+    int size;    
+    pthread_mutex_t mutex;  
 } Queue;
 
-Queue mensajes; // Cola de mensajes
+typedef struct {
+    int socket_cliente;
+    Queue *cola;
+    long current_offset;
+    char group_id[50];
+    pthread_mutex_t offset_mutex;
+} ConsumerContext;
 
-extern Queue *initQueue(); // Inicializa la cola
-extern void enqueue(Queue *queue, void *data); // Agrega un elemento a la cola
-extern void *dequeue(Queue *queue); // Elimina y devuelve el primer elemento de la cola
-extern int isEmpty(Queue *queue); // Verifica si la cola está vacía
-extern int getSize(Queue *queue); // Devuelve el tamaño de la cola
-extern void freeQueue(Queue *queue); // Libera la memoria de la cola
+// -------------------------
+// Funciones de la Cola
+// -------------------------
 
-            Esta parte es con el extern pero no esta funcionando porque colisionan los main */ 
-
-// Nodo de la cola
-typedef struct Node {    
-    void *data;             // Puntero genérico para almacenar cualquier tipo de dato    
-    struct Node *next;      // Puntero al siguiente nodo
-} Node;
-
-// Estructura de la cola
-typedef struct Queue {    
-    Node *front;            // Puntero al frente de la cola    
-    Node *rear;             // Puntero al final de la cola    
-    int size;               // Tamaño actual de la cola
-    pthread_mutex_t mutex;  // Mutex para sincronizar el acceso a la cola
-} Queue;
-
-// Función para inicializar la cola
 Queue *initQueue() {    
-    Queue *queue = (Queue *)malloc(sizeof(Queue));    
-    if (!queue) {        
-        perror("Error al asignar memoria para la cola");        
-        exit(EXIT_FAILURE);    
-    }    queue->front = NULL;    
+    Queue *queue = malloc(sizeof(Queue));    
+    queue->front = NULL;    
     queue->rear = NULL;    
     queue->size = 0;    
-    pthread_mutex_init(&queue->mutex, NULL); // Inicializar el mutex
+    pthread_mutex_init(&queue->mutex, NULL);    
     return queue;
 }
 
-// Función para agregar un elemento a la cola
 void enqueue(Queue *queue, void *data) {    
-    Node *newNode = (Node *)malloc(sizeof(Node));    
-    if (!newNode) {        
-        perror("Error al asignar memoria para el nodo");        
-        exit(EXIT_FAILURE);    
-    }    
+    pthread_mutex_lock(&queue->mutex);    
+    Node *newNode = malloc(sizeof(Node));    
     newNode->data = data;    
-    newNode->next = NULL;
-
-    pthread_mutex_lock(&queue->mutex); // Bloquear el mutex
+    newNode->next = NULL;    
+    
     if (queue->rear == NULL) {        
         queue->front = newNode;       
-        queue->rear = newNode;   
     } else {        
         queue->rear->next = newNode;        
-        queue->rear = newNode;    
     }    
-    queue->size++;
-    pthread_mutex_unlock(&queue->mutex); // Desbloquear el mutex
+    queue->rear = newNode;    
+    queue->size++;    
+    pthread_mutex_unlock(&queue->mutex);
 }
 
-// Función para eliminar un elemento de la cola
 void *dequeue(Queue *queue) {    
-    pthread_mutex_lock(&queue->mutex); // Bloquear el mutex
+    pthread_mutex_lock(&queue->mutex);    
     if (queue->front == NULL) {        
-        printf("La cola está vacía\n");      
-        pthread_mutex_unlock(&queue->mutex); // Desbloquear el mutex    
+        pthread_mutex_unlock(&queue->mutex);    
         return NULL;    
-    }
+    }    
     Node *temp = queue->front;     
     void *data = temp->data;    
-    queue->front = queue->front->next;
+    queue->front = queue->front->next;    
     if (queue->front == NULL) {        
         queue->rear = NULL;    
-    }
+    }    
     free(temp);    
-    queue->size--;  
-    pthread_mutex_unlock(&queue->mutex); // Desbloquear el mutex  
+    queue->size--;    
+    pthread_mutex_unlock(&queue->mutex);    
     return data;
 }
 
-int isEmpty(Queue *queue) {    
-    return queue->size == 0;
-}
+// -------------------------
+// Funciones de Persistencia
+// -------------------------
 
-// Función para liberar la memoria de la cola
-void freeQueue(Queue *queue) {  
-    pthread_mutex_lock(&queue->mutex); // Bloquear el mutex  
-    while (!isEmpty(queue)) {        
-        dequeue(queue);    
-    }    
-    pthread_mutex_unlock(&queue->mutex); // Desbloquear el mutex
-    pthread_mutex_destroy(&queue->mutex); // Destruir el mutex
-    free(queue);
-}
-
-typedef struct {
-    int id;
-    char origen[50];
-    char mensaje[256];
-} Mensaje;
-
-// Función para configurar un socket como no bloqueante, es decir siempre se mantiene corriendo
-void setNonBlocking(int socket) {
-    int flags = fcntl(socket, F_GETFL, 0);
-    if (flags == -1) {
-        perror("Error al obtener flags del socket");
-        exit(EXIT_FAILURE);
+long cargar_offset(const char* group_id) {
+    char filename[256];
+    snprintf(filename, sizeof(filename), "offset_%s.log", group_id);
+    
+    FILE* file = fopen(filename, "r");
+    if (!file) {
+        if (errno != ENOENT) perror("Error abriendo archivo de offset");
+        return 0;
     }
-    if (fcntl(socket, F_SETFL, flags | O_NONBLOCK) == -1) {
-        perror("Error al configurar el socket como no bloqueante");
-        exit(EXIT_FAILURE);
+    
+    // Bloqueo compartido para lectura
+    if (flock(fileno(file), LOCK_SH) == -1) {
+        perror("Error al bloquear archivo");
+        fclose(file);
+        return 0;
     }
+    
+    long offset = 0;
+    if (fscanf(file, "%ld", &offset) != 1) {
+        fprintf(stderr, "Error leyendo offset de %s\n", filename);
+    }
+    
+    flock(fileno(file), LOCK_UN);
+    fclose(file);
+    return offset;
 }
 
-typedef struct{
-    int socket_cliente; // Socket del cliente
-    Queue *cola;        // Cola para almacenar los mensajes
-} ConsumerArgs;
+void guardar_offset(const char* group_id, long offset) {
+    char filename[MAX_FILENAME_LEN];
+    char tmpfile[MAX_TMPFILE_LEN];
+    int written;
+    
+    // 1. Generar nombres de archivo
+    written = snprintf(filename, sizeof(filename), 
+                      "offset_%.*s.log", 
+                      MAX_GROUP_ID_LEN, 
+                      group_id);
+    
+    if (written >= sizeof(filename)) {
+        fprintf(stderr, "Advertencia: group_id truncado\n");
+    }
+    
+    written = snprintf(tmpfile, sizeof(tmpfile), "%s.tmp", filename);
+    if (written >= sizeof(tmpfile)) {
+        fprintf(stderr, "Error: Nombre temporal demasiado largo\n");
+        return;
+    }
 
-// Función para recibir mensajes del servidor y almacenarlos en la cola
-void *receiveMessages(void *arg) {
-    ConsumerArgs *args = (ConsumerArgs *)arg; // Convertir el argumento al tipo correcto
-    int socket_cliente = args->socket_cliente; // Obtener el socket del cliente
-    Queue *mensajes = args->cola; // Obtener la cola de mensajes
-    Mensaje msg;
+    // 2. Crear archivo temporal
+    FILE* file = fopen(tmpfile, "w");
+    if (!file) {
+        perror("Error creando archivo temporal");
+        return;
+    }
 
+    // 3. Escribir el offset
+    if (fprintf(file, "%ld", offset) < 0) {
+        perror("Error escribiendo offset");
+        fclose(file);
+        remove(tmpfile); // Limpiar archivo temporal
+        return;
+    }
+
+    // 4. Forzar escritura a disco
+    if (fflush(file) != 0) {
+        perror("Error sincronizando datos");
+        fclose(file);
+        remove(tmpfile);
+        return;
+    }
+
+    // 5. Cerrar archivo
+    if (fclose(file) != 0) {
+        perror("Error cerrando archivo temporal");
+        remove(tmpfile);
+        return;
+    }
+
+    // 6. Renombrar atómicamente
+    if (rename(tmpfile, filename) != 0) {
+        perror("Error renombrando archivo");
+        remove(tmpfile); // Limpiar residual
+        return;
+    }
+
+    // 7. Sincronizar directorio (para sistemas críticos)
+    int dirfd = open(".", O_RDONLY);
+    fsync(dirfd);
+    close(dirfd);
+}
+
+// -------------------------
+// Hilos de Trabajo
+// -------------------------
+  
+void *receiver_thread(void *arg) {
+    ConsumerContext *ctx = (ConsumerContext *)arg;
+    Message msg;
+    
     while (1) {
-        ssize_t bytes_recibidos = recv(socket_cliente, &msg, sizeof(Mensaje), 0);
-        if (bytes_recibidos > 0) {
-            // Almacenar el mensaje en la cola
-            Mensaje *msg_ptr = malloc(sizeof(Mensaje));
-            if (!msg_ptr) {
-                perror("Error al asignar memoria para el mensaje");
-            } else {
-                memcpy(msg_ptr, &msg, sizeof(Mensaje));
-                enqueue(mensajes, msg_ptr);
-                printf("Mensaje agregado a la cola. Tamaño actual de la cola: %d\n", mensajes->size);
-            }
-        } else if (bytes_recibidos == 0) {
-            printf("El servidor cerró la conexión.\n");
+        ssize_t bytes = recv(ctx->socket_cliente, &msg, sizeof(Message), 0);
+        
+        if (bytes > 0) {
+            Message *msg_copy = malloc(sizeof(Message));
+            memcpy(msg_copy, &msg, sizeof(Message));
+            enqueue(ctx->cola, msg_copy);
+            printf("[Receptor] Mensaje recibido - Offset: %ld\n", msg.offset);
+        } 
+        else if (bytes == 0) {
+            printf("Conexión cerrada por el broker\n");
             break;
-        }  else {
-            // Error al recibir el mensaje
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                // No hay datos disponibles temporalmente, continuar
-                usleep(100000); // Esperar 100 ms antes de intentar nuevamente
-                continue;
-            } else {
-                // Otro error ocurrió
-                perror("Error al recibir el mensaje");
-                break;
-            }
+        } 
+        else {
+            perror("Error en recepción");
+            break;
         }
     }
-
-    free(args); // Liberar la memoria de los argumentos
+    
+    close(ctx->socket_cliente);
     return NULL;
 }
 
-// Función para mostrar los mensajes en la cola
-void *showMessages(void *arg) {
-    Queue *cola = (Queue *)arg; // Obtener la cola de mensajes
-
+void *processor_thread(void *arg) {
+    ConsumerContext *ctx = (ConsumerContext *)arg;
+    
     while (1) {
-        if (!isEmpty(cola)) {
-            Mensaje *msg = (Mensaje *)dequeue(cola);
-            if (msg) {
-                printf("Procesando mensaje de la cola:\n");
-                printf("  ID: %d\n", msg->id);
-                printf("  Origen: %s\n", msg->origen);
-                printf("  Contenido: %s\n", msg->mensaje);
-                free(msg); // Liberar la memoria del mensaje procesado
-            }
-        } else {
-            // Si la cola está vacía, esperar un momento antes de volver a verificar
-            usleep(500000); // 500 ms
+        Message *msg = dequeue(ctx->cola);
+        if (msg) {
+            printf("\n[Grupo: %s][Offset: %ld] Origen: %s\nMessage: %s\n", 
+                  ctx->group_id, msg->offset, msg->origen, msg->Message);
+            
+            pthread_mutex_lock(&ctx->offset_mutex);
+            ctx->current_offset = msg->offset + 1;
+            guardar_offset(ctx->group_id, ctx->current_offset);
+            
+            char ack_msg[64];
+            snprintf(ack_msg, sizeof(ack_msg), "ACK=%ld", msg->offset);
+            send(ctx->socket_cliente, ack_msg, strlen(ack_msg), 0);
+            pthread_mutex_unlock(&ctx->offset_mutex);
+            
+            free(msg);
         }
+        usleep(100000); // Reducir consumo de CPU
     }
-
     return NULL;
 }
 
-
 // -------------------------
-// Implementación del Consumer con Cola
+// Configuración Principal
 // -------------------------
 
-int main(){
-    int socket_cliente;
-    struct sockaddr_in direccion_servidor;
-
-    // Inicializar la cola
-    Queue *mensajes = initQueue();
-
-    // Crear el socket TCP
-    socket_cliente = socket(AF_INET, SOCK_STREAM, 0);
-    if (socket_cliente < 0) {
-        perror("Error al crear el socket del cliente");
+int main(int argc, char *argv[]) {
+    if (argc != 3) {
+        printf("Uso: %s <grupo> <offset_inicial>\n", argv[0]);
         exit(EXIT_FAILURE);
     }
 
-    // Configurar la dirección del servidor
-    direccion_servidor.sin_family = AF_INET;
-    direccion_servidor.sin_port = htons(8080); // Puerto del servidor
-    direccion_servidor.sin_addr.s_addr = INADDR_ANY; // Dirección del servidor
-
-    // Configurar el socket como no bloqueante
-    setNonBlocking(socket_cliente);
-
-    // Intentar conectarse al servidor
-    if (connect(socket_cliente, (struct sockaddr *)&direccion_servidor, sizeof(direccion_servidor)) < 0) {
-        if (errno != EINPROGRESS) {
-            perror("Error al intentar conectarse al servidor");
-            close(socket_cliente);
-            exit(EXIT_FAILURE);
-        }
+    ConsumerContext ctx;
+    strncpy(ctx.group_id, argv[1], sizeof(ctx.group_id));
+   
+    
+    // Cargar offset desde archivo si no se especifica
+    if (strcmp(argv[2], "auto") == 0) {
+        ctx.current_offset = cargar_offset(ctx.group_id);
+    } else {
+        ctx.current_offset = atol(argv[2]);
     }
 
-    printf("Conectado al servidor...\n");
+    ctx.cola = initQueue();
+    pthread_mutex_init(&ctx.offset_mutex, NULL);
 
-    // Crear los hilos
-    pthread_t hilo_receptor, hilo_mostrador;
-
-    // Crear los argumentos para el hilo receptor
-    ConsumerArgs *args = malloc(sizeof(ConsumerArgs));
-    if (!args) {
-        perror("Error al asignar memoria para los argumentos del hilo receptor");
+    // Configurar socket
+    ctx.socket_cliente = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in broker_addr = {
+        .sin_family = AF_INET,
+        .sin_port = htons(8080),
+        .sin_addr.s_addr = INADDR_ANY
+    };
+    
+    // Conexión
+    if (connect(ctx.socket_cliente, (struct sockaddr*)&broker_addr, sizeof(broker_addr)) < 0) {
+        perror("Error de conexión");
         exit(EXIT_FAILURE);
     }
-    args->socket_cliente = socket_cliente;
-    args->cola = mensajes;
+    
+    // Registro inicial
+    char init_msg[256];
+    snprintf(init_msg, sizeof(init_msg), "GROUP=%s;OFFSET=%ld", ctx.group_id, ctx.current_offset);
+    send(ctx.socket_cliente, init_msg, strlen(init_msg), 0);
 
-    // Crear el hilo para recibir mensajes
-    if (pthread_create(&hilo_receptor, NULL, receiveMessages, args) != 0) {
-        perror("Error al crear el hilo receptor");
-        free(args); // Liberar memoria en caso de error
-        freeQueue(mensajes);
-        close(socket_cliente);
-        exit(EXIT_FAILURE);
-    }
+    // Hilos
+    pthread_t t_receiver, t_processor;
+    pthread_create(&t_receiver, NULL, receiver_thread, &ctx);
+    pthread_create(&t_processor, NULL, processor_thread, &ctx);
 
-    // Crear el hilo para mostrar mensajes
-    if (pthread_create(&hilo_mostrador, NULL, showMessages, mensajes) != 0) {
-        perror("Error al crear el hilo mostrador");
-        pthread_cancel(hilo_receptor); // Cancelar el hilo receptor si ya fue creado
-        pthread_join(hilo_receptor, NULL); // Esperar a que termine el hilo receptor
-        freeQueue(mensajes);
-        close(socket_cliente);
-        exit(EXIT_FAILURE);
-    }
+    pthread_join(t_receiver, NULL);
+    pthread_join(t_processor, NULL);
 
-    // Esperar a que los hilos terminen
-    pthread_join(hilo_receptor, NULL);
-    pthread_join(hilo_mostrador, NULL);
-
-    /*
-    En caso de error
-        if (pthread_join(hilo_receptor, NULL) != 0) {
-            perror("Error al esperar el hilo receptor");
-        }
-
-        if (pthread_join(hilo_mostrador, NULL) != 0) {
-            perror("Error al esperar el hilo mostrador");
-        }
-    */
-
-    // Liberar la memoria de la cola y cerrar el socket
-    freeQueue(mensajes);
-    close(socket_cliente);
+    // Limpieza
+    pthread_mutex_destroy(&ctx.offset_mutex);
+    free(ctx.cola->front); // Liberar memoria residual
+    free(ctx.cola);
+    close(ctx.socket_cliente);
 
     return 0;
 }
