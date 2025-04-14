@@ -9,6 +9,7 @@
 
 // Definición de la estructura del mensaje
 typedef struct {
+    long offset;
     int id;
     char origen[50];
     char mensaje[256];
@@ -60,7 +61,7 @@ int main() {
 
     // Configurar la estructura de la dirección del servidor
     servidor.sin_family = AF_INET;
-    servidor.sin_port = htons(8080); // Puerto del servidor (broker)
+    servidor.sin_port = htons(8081); // Puerto del servidor (broker)
     
     // Convertir la dirección IP a formato binario
     if(inet_pton(AF_INET, "127.0.0.1", &servidor.sin_addr) <= 0) {

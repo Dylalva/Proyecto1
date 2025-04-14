@@ -26,3 +26,12 @@ obj/
 *.swo
 src/Broker
 src/Producer
+src/broker
+src/c
+src/Consumer
+src/consumer
+src/Consumer
+src/log.txt
+src/offset.tmp
+src/producer
+src/log.txt
