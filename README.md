@@ -8,6 +8,8 @@
 | Dylan Elizondo Alvarado  | 504610652       |
 | Luis David Salgado Gamez | 208670670       |
 | Rodrigo Ureña Castillo   | 118910482       |
+
+---
 ![Mensaje Broker](https://substackcdn.com/image/fetch/f_auto,q_auto:good,fl_progressive:steep/https%3A%2F%2Fsubstack-post-media.s3.amazonaws.com%2Fpublic%2Fimages%2Fb6eab95c-f56f-45c7-9248-7e6070c1979b_1614x702.png)
 
 Este proyecto es una implementación en C de un sistema distribuido de broker de mensajes inspirado en Apache Kafka. Su finalidad es aprender a manejar múltiples procesos y técnicas de IPC, comunicación vía sockets TCP, concurrencia, sincronización y prevención de interbloqueos, empleando mecanismos como pipes, hilos, memoria compartida y semáforos.
