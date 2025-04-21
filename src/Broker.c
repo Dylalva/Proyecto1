@@ -78,7 +78,7 @@ void freeQueue(Queue *queue) {
 }
 
 // --------------------
-// Estructuras de mensaje y consumidores/producers
+// Estructuras de mensaje y consumers/producers
 // --------------------
 
 typedef struct {
@@ -86,7 +86,7 @@ typedef struct {
     int id;
     char origen[50];
     char mensaje[256];
-} Mensaje;
+} Message;
 
 typedef struct {
     int id;
@@ -149,6 +149,7 @@ void addConsumerGroup(ConsumerGroupContainer *container, ConsumerList *group) {
 Queue *cola;
 int mensaje_id = 0;
 pthread_mutex_t cola_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t cola_cond = PTHREAD_COND_INITIALIZER;
 pthread_mutex_t consumer_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 ConsumerGroupContainer *consumerGroups;
@@ -157,18 +158,18 @@ ConsumerGroupContainer *consumerGroups;
 // Funciones de manejo de mensajes
 // --------------------
 
-void imprimirCola(Queue *queue) {
+void printQueue(Queue *queue) {
     printf("\n--- Mensajes en la Cola ---\n");
     Node *current = queue->front;
     while (current) {
-        Mensaje *msg = (Mensaje *)current->data;
+        Message *msg = (Message *)current->data;
         printf("ID: %d | Origen: %s | Contenido: %s\n", msg->id, msg->origen, msg->mensaje);
         current = current->next;
     }
     printf("---------------------------\n");
 }
 
-void imprimirConsumers(ConsumerGroupContainer *container) {
+void printConsumers(ConsumerGroupContainer *container) {
     printf("\n--- Consumers Conectados ---\n");
     for (int i = 0; i < container->count; i++) {
         ConsumerList *group = container->groups[i];
@@ -181,7 +182,53 @@ void imprimirConsumers(ConsumerGroupContainer *container) {
     printf("-----------------------------\n");
 }
 
-void enviarMensajeAConsumers(Mensaje *msg) {
+//============================================================================
+//Tratar de optimizar este metodo.
+void deleteConsumer(ConsumerGroupContainer *container, int consumer_id) {
+    pthread_mutex_lock(&consumer_mutex);
+
+    for (int i = 0; i < container->count; i++) {
+        ConsumerList *group = container->groups[i];
+        for (int j = 0; j < group->count; j++) {
+            if (group->consumers[j]->id == consumer_id) {
+                // Liberar memoria del Consumer
+                close(group->consumers[j]->socket_fd);
+                free(group->consumers[j]);
+
+                // Mover los consumidores restantes para llenar el hueco
+                for (int k = j; k < group->count - 1; k++) {
+                    group->consumers[k] = group->consumers[k + 1];
+                }
+                group->count--;
+
+                printf("Consumer ID %d eliminado del Grupo %d\n", consumer_id, i + 1);
+
+                if (group->count == 0) {
+                    printf("El Grupo %d está vacío.\n", i + 1);
+                     // Liberar la memoria del grupo
+                     free(group->consumers);
+                     free(group);
+ 
+                     // Mover los grupos restantes para llenar el hueco
+                     for (int k = i; k < container->count - 1; k++) {
+                         container->groups[k] = container->groups[k + 1];
+                     }
+                     container->count--;
+ 
+                     printf("Grupo %d eliminado.\n", i + 1);
+                }
+
+                pthread_mutex_unlock(&consumer_mutex);
+                return;
+            }
+        }
+    }
+    pthread_mutex_unlock(&consumer_mutex);
+    printf("Consumer ID %d no encontrado.\n", consumer_id);
+}
+//============================================================================
+
+void sendMessageConsumers(Message *msg) {
     pthread_mutex_lock(&consumer_mutex);
     for (int i = 0; i < consumerGroups->count; i++) {
         ConsumerList *group = consumerGroups->groups[i];
@@ -191,8 +238,9 @@ void enviarMensajeAConsumers(Mensaje *msg) {
             Consumer *consumer = group->consumers[random_index];
 
             // Enviar el mensaje al consumidor seleccionado
-            if (send(consumer->socket_fd, msg, sizeof(Mensaje), 0) < 0) {
+            if (send(consumer->socket_fd, msg, sizeof(Message), 0) < 0) {
                 perror("Error al enviar el mensaje al consumer");
+                deleteConsumer(consumerGroups, consumer->id); 
             } else {
                 printf("Mensaje enviado al Consumer ID: %d del Grupo %d\n", consumer->id, i + 1);
             }
@@ -204,32 +252,27 @@ void enviarMensajeAConsumers(Mensaje *msg) {
 // Manejo de conexiones
 // --------------------
 
-void *manejarConexionProducer(void *arg) {
+void *handlerConnProducer(void *arg) {
     int socket_cliente = *(int *)arg;
     free(arg);
 
-    Mensaje msg;
-    ssize_t bytes_recibidos = recv(socket_cliente, &msg, sizeof(Mensaje), 0);
+    Message msg;
+    ssize_t bytes_recibidos = recv(socket_cliente, &msg, sizeof(Message), 0);
 
     if (bytes_recibidos > 0) {
-        pthread_mutex_lock(&cola_mutex);
         msg.id = mensaje_id++;
 
-        Mensaje *msg_ptr = malloc(sizeof(Mensaje));
+        Message *msg_ptr = malloc(sizeof(Message));
         if (msg_ptr) {
-            memcpy(msg_ptr, &msg, sizeof(Mensaje));
+            memcpy(msg_ptr, &msg, sizeof(Message));
+            pthread_mutex_lock(&cola_mutex);
             enqueue(cola, msg_ptr);
 
             printf("\nMensaje recibido de Producer:\n");
             printf("  ID: %d\n  Origen: %s\n  Contenido: %s\n", msg.id, msg.origen, msg.mensaje);
 
-            imprimirCola(cola);
-            imprimirConsumers(consumerGroups);
-
-            enviarMensajeAConsumers(msg_ptr);
-
-            // Eliminar el mensaje de la cola después de enviarlo
-            dequeue(cola);
+            pthread_cond_signal(&cola_cond); //Avisar al hilo que envia mensajes que hay un nuevo mensaje
+            printQueue(cola);//Sola para pruebas
         } else {
             perror("No se pudo asignar memoria para el mensaje");
         }
@@ -242,7 +285,27 @@ void *manejarConexionProducer(void *arg) {
     pthread_exit(NULL);
 }
 
-void *manejarConexionConsumer(void *arg) {
+void *handlerSendMessage(void *arg) {
+    while (1) {
+        pthread_mutex_lock(&cola_mutex);
+        while (isEmpty(cola)) {
+            printf("Esperando mensajes en la cola...\n");
+            pthread_cond_wait(&cola_cond, &cola_mutex);
+        }
+
+        Message *msg = (Message *)dequeue(cola);
+        pthread_mutex_unlock(&cola_mutex);
+
+        if (msg) {
+            sendMessageConsumers(msg);
+            free(msg);
+        }
+        printf("Mensaje enviado a los Consumers.\n");
+    }
+    return NULL;
+}
+
+void *handlerConnConsumer(void *arg) {
     int socket_cliente = *(int *)arg;
     free(arg);
 
@@ -267,7 +330,7 @@ void *manejarConexionConsumer(void *arg) {
 // Hilos para manejar conexiones
 // --------------------
 
-void *hiloProducers(void *arg) {
+void *handlerThreadProducer(void *arg) {
     int socket_servidor = *(int *)arg;
     while (1) {
         struct sockaddr_in direccion_cliente;
@@ -282,7 +345,7 @@ void *hiloProducers(void *arg) {
         *socket_ptr = nueva_conexion;
 
         pthread_t hilo;
-        if (pthread_create(&hilo, NULL, manejarConexionProducer, socket_ptr) != 0) {
+        if (pthread_create(&hilo, NULL, handlerConnProducer, socket_ptr) != 0) {
             perror("No se pudo crear hilo para manejar conexión de Producer");
             close(nueva_conexion);
             free(socket_ptr);
@@ -292,7 +355,7 @@ void *hiloProducers(void *arg) {
     }
 }
 
-void *hiloConsumers(void *arg) {
+void *handlerThreadConsumer(void *arg) {
     int socket_servidor = *(int *)arg;
     while (1) {
         struct sockaddr_in direccion_cliente;
@@ -307,7 +370,7 @@ void *hiloConsumers(void *arg) {
         *socket_ptr = nueva_conexion;
 
         pthread_t hilo;
-        if (pthread_create(&hilo, NULL, manejarConexionConsumer, socket_ptr) != 0) {
+        if (pthread_create(&hilo, NULL, handlerConnConsumer, socket_ptr) != 0) {
             perror("No se pudo crear hilo para manejar conexión de Consumer");
             close(nueva_conexion);
             free(socket_ptr);
@@ -321,7 +384,7 @@ void *hiloConsumers(void *arg) {
 // Función principal del broker
 // --------------------
 
-void iniciar_broker() {
+void init_broker() {
     int socket_producers, socket_consumers;
     struct sockaddr_in direccion_producers, direccion_consumers;
 
@@ -381,12 +444,14 @@ void iniciar_broker() {
 
     printf("Broker ACTIVO escuchando en los puertos 8081 (Producers) y 8082 (Consumers)...\n");
 
-    pthread_t hilo_producers, hilo_consumers;
-    pthread_create(&hilo_producers, NULL, hiloProducers, &socket_producers);
-    pthread_create(&hilo_consumers, NULL, hiloConsumers, &socket_consumers);
+    pthread_t hilo_producers, hilo_consumers, hilo_enviar;
+    pthread_create(&hilo_producers, NULL, handlerThreadProducer, &socket_producers);
+    pthread_create(&hilo_consumers, NULL, handlerThreadConsumer, &socket_consumers);
+    pthread_create(&hilo_enviar, NULL, handlerSendMessage, NULL);
 
     pthread_join(hilo_producers, NULL);
     pthread_join(hilo_consumers, NULL);
+    pthread_join(hilo_enviar, NULL);
 
     freeQueue(cola);
     close(socket_producers);
@@ -415,7 +480,7 @@ int main() {
         if (bind(socket_prueba, (struct sockaddr *)&direccion, sizeof(direccion)) == 0) {
             close(socket_prueba);
             printf("Este broker asume el rol ACTIVO en el intento #%d\n", intento + 1);
-            iniciar_broker();
+            init_broker();
             break;
         } else {
             if (errno == EADDRINUSE) {
