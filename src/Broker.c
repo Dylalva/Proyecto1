@@ -5,7 +5,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <pthread.h>
-
+#include <semaphore.h>
 // --------------------
 // Estructuras y cola
 // --------------------
@@ -21,61 +21,6 @@ typedef struct Queue {
     int size;
 } Queue;
 
-Queue *initQueue() {
-    Queue *queue = (Queue *)malloc(sizeof(Queue));
-    if (!queue) {
-        perror("Error al asignar memoria para la cola");
-        exit(EXIT_FAILURE);
-    }
-    queue->front = NULL;
-    queue->rear = NULL;
-    queue->size = 0;
-    return queue;
-}
-
-void enqueue(Queue *queue, void *data) {
-    Node *newNode = (Node *)malloc(sizeof(Node));
-    if (!newNode) {
-        perror("Error al asignar memoria para el nodo");
-        exit(EXIT_FAILURE);
-    }
-    newNode->data = data;
-    newNode->next = NULL;
-    if (queue->rear == NULL) {
-        queue->front = newNode;
-        queue->rear = newNode;
-    } else {
-        queue->rear->next = newNode;
-        queue->rear = newNode;
-    }
-    queue->size++;
-}
-
-void *dequeue(Queue *queue) {
-    if (queue->front == NULL) {
-        return NULL;
-    }
-    Node *temp = queue->front;
-    void *data = temp->data;
-    queue->front = queue->front->next;
-    if (queue->front == NULL) {
-        queue->rear = NULL;
-    }
-    free(temp);
-    queue->size--;
-    return data;
-}
-
-int isEmpty(Queue *queue) {
-    return queue->size == 0;
-}
-
-void freeQueue(Queue *queue) {
-    while (!isEmpty(queue)) {
-        dequeue(queue);
-    }
-    free(queue);
-}
 
 // --------------------
 // Estructuras de mensaje y consumers/producers
@@ -98,27 +43,123 @@ typedef struct {
     Consumer **consumers;
     int count;
     int capacity;
-} ConsumerList;
+    int consumer_index;
+    pthread_t thread_group;
+} ConsumerGroup;
+
+typedef struct ConsumerGroupNode {
+    ConsumerGroup *group;
+    struct ConsumerGroupNode *next;
+} ConsumerGroupNode;
 
 typedef struct {
-    ConsumerList **groups;
-    int count;
-    int capacity;
+    ConsumerGroupNode *head;
+    pthread_mutex_t mutex;
 } ConsumerGroupContainer;
+
+
+// --------------------
+// Variables globales
+// --------------------
+
+Queue *cola;
+int mensaje_id = 0;
+int consumer_id = 0;
+pthread_mutex_t cola_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t cola_cond = PTHREAD_COND_INITIALIZER;
+pthread_mutex_t consumer_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+#define MAX_QUEUE_SIZE 1000 // Límite máximo de mensajes en la cola
+sem_t cola_sem; // Semáforo para controlar el tamaño de la cola
+ConsumerGroupContainer *consumerGroups;
+Queue *initQueue() {
+    Queue *queue = (Queue *)malloc(sizeof(Queue));
+    if (!queue) {
+        perror("Error al asignar memoria para la cola");
+        exit(EXIT_FAILURE);
+    }
+    queue->front = NULL;
+    queue->rear = NULL;
+    queue->size = 0;
+    return queue;
+}
+
+void enqueue(Queue *queue, void *data) {
+
+    sem_wait(&cola_sem);
+    pthread_mutex_lock(&cola_mutex);
+
+    Node *newNode = (Node *)malloc(sizeof(Node));
+    if (!newNode) {
+        perror("Error al asignar memoria para el nodo");
+        exit(EXIT_FAILURE);
+    }
+    newNode->data = data;
+    newNode->next = NULL;
+
+    if (queue->rear == NULL) {
+        queue->front = newNode;
+        queue->rear = newNode;
+    } else {
+        queue->rear->next = newNode;
+        queue->rear = newNode;
+    }
+    queue->size++;
+
+    printf("Mensaje agregado a la cola. Tamaño actual: %d\n", queue->size);
+
+    pthread_mutex_unlock(&cola_mutex);
+}
+
+void *dequeue(Queue *queue) {
+    pthread_mutex_lock(&cola_mutex);
+    if (queue->front == NULL) {
+        pthread_mutex_unlock(&cola_mutex);
+        return NULL;
+    }
+
+    Node *temp = queue->front;
+    void *data = temp->data;
+    queue->front = queue->front->next;
+    if (queue->front == NULL) {
+        queue->rear = NULL;
+    }
+    queue->size--;
+
+    // Incrementar el semáforo para liberar espacio en la cola
+    sem_post(&cola_sem);
+
+    free(temp);
+
+    pthread_mutex_unlock(&cola_mutex);
+    return data;
+}
+
+int isEmpty(Queue *queue) {
+    return queue->size == 0;
+}
+
+void freeQueue(Queue *queue) {
+    while (!isEmpty(queue)) {
+        dequeue(queue);
+    }
+    free(queue);
+}
 
 // --------------------
 // Funciones para manejar listas
 // --------------------
 
-ConsumerList *initConsumerList() {
-    ConsumerList *list = malloc(sizeof(ConsumerList));
+ConsumerGroup *initConsumerGroup() {
+    ConsumerGroup *list = malloc(sizeof(ConsumerGroup));
     list->count = 0;
     list->capacity = 5; // Máximo de 5 consumidores por grupo
+    list->consumer_index = 0;
     list->consumers = malloc(sizeof(Consumer *) * list->capacity);
     return list;
 }
 
-void addConsumer(ConsumerList *list, Consumer *consumer) {
+void addConsumer(ConsumerGroup *list, Consumer *consumer) {
     if (list->count == list->capacity) {
         printf("El grupo ya tiene el máximo de consumidores (5).\n");
         return;
@@ -128,37 +169,28 @@ void addConsumer(ConsumerList *list, Consumer *consumer) {
 
 ConsumerGroupContainer *initConsumerGroupContainer() {
     ConsumerGroupContainer *container = malloc(sizeof(ConsumerGroupContainer));
-    container->count = 0;
-    container->capacity = 10;
-    container->groups = malloc(sizeof(ConsumerList *) * container->capacity);
+    container->head = NULL;
+    pthread_mutex_init(&container->mutex, NULL);
     return container;
 }
 
-void addConsumerGroup(ConsumerGroupContainer *container, ConsumerList *group) {
-    if (container->count == container->capacity) {
-        container->capacity *= 2;
-        container->groups = realloc(container->groups, sizeof(ConsumerList *) * container->capacity);
-    }
-    container->groups[container->count++] = group;
+void addConsumerGroup(ConsumerGroupContainer *container, ConsumerGroup *group) {
+    pthread_mutex_lock(&container->mutex);
+
+    ConsumerGroupNode *newNode = malloc(sizeof(ConsumerGroupNode));
+    newNode->group = group;
+    newNode->next = container->head;
+    container->head = newNode;
+
+    pthread_mutex_unlock(&container->mutex);
 }
-
-// --------------------
-// Variables globales
-// --------------------
-
-Queue *cola;
-int mensaje_id = 0;
-pthread_mutex_t cola_mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t cola_cond = PTHREAD_COND_INITIALIZER;
-pthread_mutex_t consumer_mutex = PTHREAD_MUTEX_INITIALIZER;
-
-ConsumerGroupContainer *consumerGroups;
 
 // --------------------
 // Funciones de manejo de mensajes
 // --------------------
 
 void printQueue(Queue *queue) {
+    pthread_mutex_lock(&cola_mutex);
     printf("\n--- Mensajes en la Cola ---\n");
     Node *current = queue->front;
     while (current) {
@@ -167,85 +199,83 @@ void printQueue(Queue *queue) {
         current = current->next;
     }
     printf("---------------------------\n");
-}
-
-void printConsumers(ConsumerGroupContainer *container) {
-    printf("\n--- Consumers Conectados ---\n");
-    for (int i = 0; i < container->count; i++) {
-        ConsumerList *group = container->groups[i];
-        printf("Grupo %d:\n", i + 1);
-        for (int j = 0; j < group->count; j++) {
-            Consumer *consumer = group->consumers[j];
-            printf("  Consumer ID: %d\n", consumer->id);
-        }
-    }
-    printf("-----------------------------\n");
+    pthread_mutex_unlock(&cola_mutex);
 }
 
 //============================================================================
-//Tratar de optimizar este metodo.
+
 void deleteConsumer(ConsumerGroupContainer *container, int consumer_id) {
-    pthread_mutex_lock(&consumer_mutex);
+    pthread_mutex_lock(&container->mutex);
 
-    for (int i = 0; i < container->count; i++) {
-        ConsumerList *group = container->groups[i];
-        for (int j = 0; j < group->count; j++) {
-            if (group->consumers[j]->id == consumer_id) {
-                // Liberar memoria del Consumer
-                close(group->consumers[j]->socket_fd);
-                free(group->consumers[j]);
+    ConsumerGroupNode *prevNode = NULL;
+    ConsumerGroupNode *currentNode = container->head;
 
-                // Mover los consumidores restantes para llenar el hueco
-                for (int k = j; k < group->count - 1; k++) {
-                    group->consumers[k] = group->consumers[k + 1];
+    while (currentNode) {
+        ConsumerGroup *group = currentNode->group;
+
+        for (int i = 0; i < group->count; i++) {
+            if (group->consumers[i]->id == consumer_id) {
+                // Eliminar el consumidor
+                close(group->consumers[i]->socket_fd);
+                free(group->consumers[i]);
+
+                for (int j = i; j < group->count - 1; j++) {
+                    group->consumers[j] = group->consumers[j + 1];
                 }
                 group->count--;
 
-                printf("Consumer ID %d eliminado del Grupo %d\n", consumer_id, i + 1);
-
+                // Si el grupo queda vacío, eliminarlo
                 if (group->count == 0) {
-                    printf("El Grupo %d está vacío.\n", i + 1);
-                     // Liberar la memoria del grupo
-                     free(group->consumers);
-                     free(group);
- 
-                     // Mover los grupos restantes para llenar el hueco
-                     for (int k = i; k < container->count - 1; k++) {
-                         container->groups[k] = container->groups[k + 1];
-                     }
-                     container->count--;
- 
-                     printf("Grupo %d eliminado.\n", i + 1);
+                    free(group->consumers);
+                    free(group);
+
+                    if (prevNode) {
+                        prevNode->next = currentNode->next;
+                    } else {
+                        container->head = currentNode->next;
+                    }
+                    free(currentNode);
                 }
 
-                pthread_mutex_unlock(&consumer_mutex);
+                pthread_mutex_unlock(&container->mutex);
                 return;
             }
         }
+
+        prevNode = currentNode;
+        currentNode = currentNode->next;
     }
-    pthread_mutex_unlock(&consumer_mutex);
-    printf("Consumer ID %d no encontrado.\n", consumer_id);
+
+    pthread_mutex_unlock(&container->mutex);
 }
+
 //============================================================================
 
 void sendMessageConsumers(Message *msg) {
     pthread_mutex_lock(&consumer_mutex);
-    for (int i = 0; i < consumerGroups->count; i++) {
-        ConsumerList *group = consumerGroups->groups[i];
-        if (group->count > 0) {
-            // Seleccionar un índice aleatorio dentro del grupo
-            int random_index = rand() % group->count;
-            Consumer *consumer = group->consumers[random_index];
 
-            // Enviar el mensaje al consumidor seleccionado
+    ConsumerGroupNode *currentNode = consumerGroups->head;
+    while (currentNode) {
+        ConsumerGroup *group = currentNode->group;
+
+        if (group->count > 0) {
+            // Seleccionar un consumidor aleatorio
+            if(group->consumer_index >= group->count) {
+                group->consumer_index = 0;
+            }
+            Consumer *consumer = group->consumers[group->consumer_index++];
+
             if (send(consumer->socket_fd, msg, sizeof(Message), 0) < 0) {
                 perror("Error al enviar el mensaje al consumer");
-                deleteConsumer(consumerGroups, consumer->id); 
+                deleteConsumer(consumerGroups, consumer->id);
             } else {
-                printf("Mensaje enviado al Consumer ID: %d del Grupo %d\n", consumer->id, i + 1);
+                printf("Mensaje enviado al Consumer ID: %d\n", consumer->id);
             }
         }
+
+        currentNode = currentNode->next;
     }
+
     pthread_mutex_unlock(&consumer_mutex);
 }
 // --------------------
@@ -265,7 +295,6 @@ void *handlerConnProducer(void *arg) {
         Message *msg_ptr = malloc(sizeof(Message));
         if (msg_ptr) {
             memcpy(msg_ptr, &msg, sizeof(Message));
-            pthread_mutex_lock(&cola_mutex);
             enqueue(cola, msg_ptr);
 
             printf("\nMensaje recibido de Producer:\n");
@@ -276,7 +305,6 @@ void *handlerConnProducer(void *arg) {
         } else {
             perror("No se pudo asignar memoria para el mensaje");
         }
-        pthread_mutex_unlock(&cola_mutex);
     } else {
         perror("Error al recibir mensaje o conexión cerrada");
     }
@@ -288,19 +316,41 @@ void *handlerConnProducer(void *arg) {
 void *handlerSendMessage(void *arg) {
     while (1) {
         pthread_mutex_lock(&cola_mutex);
+
+        // Esperar a que haya mensajes en la cola
         while (isEmpty(cola)) {
             printf("Esperando mensajes en la cola...\n");
             pthread_cond_wait(&cola_cond, &cola_mutex);
         }
 
-        Message *msg = (Message *)dequeue(cola);
         pthread_mutex_unlock(&cola_mutex);
+
+        // Verificar si hay consumidores disponibles
+        pthread_mutex_lock(&consumer_mutex);
+        int consumers_available = 0;
+        ConsumerGroupNode *currentNode = consumerGroups->head;
+        while (currentNode) {
+            if (currentNode->group->count > 0) {
+                consumers_available = 1;
+                break;
+            }
+            currentNode = currentNode->next;
+        }
+        pthread_mutex_unlock(&consumer_mutex);
+
+        if (!consumers_available) {
+            printf("No hay consumidores disponibles. Esperando...\n");
+            sleep(1); 
+            continue;
+        }
+
+        // Si hay consumidores, procesar el mensaje
+        Message *msg = (Message *)dequeue(cola);
 
         if (msg) {
             sendMessageConsumers(msg);
             free(msg);
         }
-        printf("Mensaje enviado a los Consumers.\n");
     }
     return NULL;
 }
@@ -310,17 +360,34 @@ void *handlerConnConsumer(void *arg) {
     free(arg);
 
     Consumer *consumer = malloc(sizeof(Consumer));
-    consumer->id = mensaje_id++;
+    consumer->id = consumer_id++;
     consumer->socket_fd = socket_cliente;
-    socklen_t addr_len = sizeof(consumer->direccion);
-    getpeername(socket_cliente, (struct sockaddr *)&consumer->direccion, &addr_len);
 
     pthread_mutex_lock(&consumer_mutex);
-    if (consumerGroups->count == 0 || consumerGroups->groups[consumerGroups->count - 1]->count == 5) {
-        addConsumerGroup(consumerGroups, initConsumerList());
+
+    // Buscar un grupo con espacio disponible o crear uno nuevo
+    ConsumerGroupNode *currentNode = consumerGroups->head;
+    ConsumerGroup *targetGroup = NULL;
+
+    while (currentNode) {
+        if (currentNode->group->count < currentNode->group->capacity) {
+            targetGroup = currentNode->group;
+            break;
+        }
+        currentNode = currentNode->next;
     }
-    addConsumer(consumerGroups->groups[consumerGroups->count - 1], consumer);
+
+    if (!targetGroup) {
+        // Crear un nuevo grupo si no hay espacio en los existentes
+        targetGroup = initConsumerGroup();
+        addConsumerGroup(consumerGroups, targetGroup);
+    }
+
+    addConsumer(targetGroup, consumer);
     pthread_mutex_unlock(&consumer_mutex);
+
+    // Notificar a los hilos de envío que hay un nuevo consumidor
+    pthread_cond_broadcast(&cola_cond);
 
     printf("Nuevo Consumer conectado con ID: %d\n", consumer->id);
     pthread_exit(NULL);
@@ -389,6 +456,7 @@ void init_broker() {
     struct sockaddr_in direccion_producers, direccion_consumers;
 
     cola = initQueue();
+    sem_init(&cola_sem, 0, MAX_QUEUE_SIZE);
     consumerGroups = initConsumerGroupContainer();
 
     // Configurar socket para Producers
@@ -454,9 +522,11 @@ void init_broker() {
     pthread_join(hilo_enviar, NULL);
 
     freeQueue(cola);
+    sem_destroy(&cola_sem);
     close(socket_producers);
     close(socket_consumers);
 }
+    
 
 // --------------------
 // Mecanismo de failover
