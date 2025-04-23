@@ -65,9 +65,11 @@ typedef struct {
 Queue *cola;
 int mensaje_id = 0;
 int consumer_id = 0;
+pthread_mutex_t mensaje_id_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t cola_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t cola_cond = PTHREAD_COND_INITIALIZER;
 pthread_mutex_t consumer_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER; // Mutex para proteger el archivo de log
 
 #define MAX_QUEUE_SIZE 1000 // Límite máximo de mensajes en la cola
 sem_t cola_sem; // Semáforo para controlar el tamaño de la cola
@@ -290,7 +292,20 @@ void *handlerConnProducer(void *arg) {
     ssize_t bytes_recibidos = recv(socket_cliente, &msg, sizeof(Message), 0);
 
     if (bytes_recibidos > 0) {
+        pthread_mutex_lock(&mensaje_id_mutex);
         msg.id = mensaje_id++;
+        pthread_mutex_unlock(&mensaje_id_mutex);
+
+        // Registrar el mensaje en el archivo mensajes.log
+        pthread_mutex_lock(&log_mutex); // Bloquear el mutex antes de escribir en el archivo
+        FILE *log_file = fopen("mensajes.log", "a");
+        if (log_file) {
+            fprintf(log_file, "ID: %d | Origen: %s | Contenido: %s\n", msg.id, msg.origen, msg.mensaje);
+            fclose(log_file);
+        } else {
+            perror("Error al abrir el archivo mensajes.log");
+        }
+        pthread_mutex_unlock(&log_mutex); // Liberar el mutex después de escribir en el archivo
 
         Message *msg_ptr = malloc(sizeof(Message));
         if (msg_ptr) {
@@ -300,8 +315,8 @@ void *handlerConnProducer(void *arg) {
             printf("\nMensaje recibido de Producer:\n");
             printf("  ID: %d\n  Origen: %s\n  Contenido: %s\n", msg.id, msg.origen, msg.mensaje);
 
-            pthread_cond_signal(&cola_cond); //Avisar al hilo que envia mensajes que hay un nuevo mensaje
-            printQueue(cola);//Sola para pruebas
+            pthread_cond_signal(&cola_cond); // Avisar al hilo que envía mensajes que hay un nuevo mensaje
+            printQueue(cola); // Solo para pruebas
         } else {
             perror("No se pudo asignar memoria para el mensaje");
         }
