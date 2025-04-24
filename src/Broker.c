@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <semaphore.h>
+#include <signal.h>
 // --------------------
 // Estructuras y cola
 // --------------------
@@ -270,6 +271,7 @@ void sendMessageConsumers(Message *msg) {
 
     ConsumerGroupNode *currentNode = consumerGroups->head;
     while (currentNode) {
+        ConsumerGroupNode *next = currentNode->next;
         ConsumerGroup *group = currentNode->group;
 
         if (group->count > 0) {
@@ -281,13 +283,14 @@ void sendMessageConsumers(Message *msg) {
 
             if (send(consumer->socket_fd, msg, sizeof(Message), 0) < 0) {
                 perror("Error al enviar el mensaje al consumer");
+                pthread_mutex_unlock(&consumerGroups->mutex);
                 deleteConsumer(consumerGroups, consumer->id);
             } else {
                 printf("Mensaje enviado al Consumer ID: %d\n", consumer->id);
             }
         }
 
-        currentNode = currentNode->next;
+        currentNode = next;
     }
 
     pthread_mutex_unlock(&consumer_mutex);
@@ -326,8 +329,10 @@ void *handlerConnProducer(void *arg) {
 
             printf("\nMensaje recibido de Producer:\n");
             printf("  ID: %d\n  Origen: %s\n  Contenido: %s\n", msg.id, msg.origen, msg.mensaje);
-
+            
+            pthread_mutex_lock(&cola_mutex);
             pthread_cond_signal(&cola_cond); // Avisar al hilo que envía mensajes que hay un nuevo mensaje
+            pthread_mutex_unlock(&cola_mutex);
             printQueue(cola); // Solo para pruebas
         } else {
             perror("No se pudo asignar memoria para el mensaje");
@@ -409,12 +414,12 @@ void *handlerConnConsumer(void *arg) {
         targetGroup = initConsumerGroup();
         addConsumerGroup(consumerGroups, targetGroup);
     }
-
+    pthread_cond_broadcast(&cola_cond);
     addConsumer(targetGroup, consumer);
     pthread_mutex_unlock(&consumer_mutex);
 
     // Notificar a los hilos de envío que hay un nuevo consumidor
-    pthread_cond_broadcast(&cola_cond);
+ 
 
     printf("Nuevo Consumer conectado con ID: %d\n", consumer->id);
     pthread_exit(NULL);
@@ -560,6 +565,7 @@ void init_broker() {
 // --------------------
 
 int main() {
+    signal(SIGPIPE, SIG_IGN);
     int intento = 0;
     srand(time(NULL));
     while (1) {
