@@ -204,6 +204,18 @@ void printQueue(Queue *queue) {
     pthread_mutex_unlock(&cola_mutex);
 }
 
+void printConsumers() {
+    ConsumerGroupNode *node = consumerGroups->head;
+    int cont = 0;
+    while (node) {
+        ConsumerGroup *group = node->group;
+        printf("\n--- Grupo de Consumidores : %d ---\n", cont++);
+        for (int i = 0; i < group->count; i++) {
+            printf("Consumer ID: %d | Socket FD: %d\n", group->consumers[i]->id, group->consumers[i]->socket_fd);
+        }
+        node = node->next;
+    }
+}
 //============================================================================
 
 void deleteConsumer(ConsumerGroupContainer *container, int consumer_id) {
