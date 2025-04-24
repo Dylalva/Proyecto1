@@ -301,7 +301,7 @@ int main(int argc, char *argv[]) {
     ctx.socket_cliente = socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in broker_addr = {
         .sin_family = AF_INET,
-        .sin_port = htons(8000),
+        .sin_port = htons(8082),
         .sin_addr.s_addr = INADDR_ANY
     };
     
