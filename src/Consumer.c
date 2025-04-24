@@ -1,3 +1,4 @@
+//Constante para el manejo de señales
 #define _POSIX_C_SOURCE 200809L
 
 #include <stdio.h>
@@ -10,21 +11,18 @@
 #include <pthread.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <poll.h>
 #include <sys/time.h>  // Para struct timeval
 #include <signal.h>    // Para manejo de señales
 
 
-// -------------------------
-// Configuraciones
-// -------------------------
+// Definiciones de constantes
 #define MAX_FILENAME_LEN   256
 #define MAX_TMPFILE_LEN    (MAX_FILENAME_LEN + 4)
 #define QUEUE_CAPACITY     100
 #define SOCKET_TIMEOUT_SEC 2
 
-// -------------------------
 // Estructuras de Datos
-// -------------------------
 typedef struct {
     long offset;
     int id;
@@ -90,6 +88,17 @@ Queue *initQueue() {
     return queue;
 }
 
+void freeQueue(Queue *queue) {    
+    Node *current = queue->front;    
+    while (current) {        
+        Node *next = current->next;        
+        free(current->data);        
+        free(current);        
+        current = next;    
+    }    
+    free(queue);    
+}
+
 void enqueue(Queue *queue, void *data) {    
     pthread_mutex_lock(&queue->mutex);    
     Node *newNode = malloc(sizeof(Node));    
@@ -145,6 +154,8 @@ long cargar_offset() {
     return offset;
 }
 
+//============================================================================
+
 void guardar_offset(long offset) {
     const char* filename = "offset.log";
     const char* tmpfile = "offset.tmp";
@@ -164,10 +175,8 @@ void guardar_offset(long offset) {
     }
 }
 
-#include <poll.h>
-
 // -------------------------
-// Hilos de Trabajo (Versión mejorada con poll)
+// Hilos de Trabajo 
 // -------------------------
 void *receiver_thread(void *arg) {
     ConsumerContext *ctx = (ConsumerContext *)arg;
@@ -224,6 +233,8 @@ void *receiver_thread(void *arg) {
     return NULL;
 }
 
+//============================================================================
+
 void *processor_thread(void *arg) {
     ConsumerContext *ctx = (ConsumerContext *)arg;
     
@@ -243,7 +254,7 @@ void *processor_thread(void *arg) {
             
         pthread_mutex_lock(&ctx->offset_mutex);
         ctx->current_offset = msg->offset + 1;
-        guardar_offset(ctx->current_offset);
+        //guardar_offset(ctx->current_offset);
         
         char ack_msg[64];
         snprintf(ack_msg, sizeof(ack_msg), "ACK=%ld", msg->offset);
@@ -285,11 +296,11 @@ void setup_signal_handlers() {
 }
 
 // -------------------------
-// Configuración Principal
+// Función Principal
 // -------------------------
 int main(int argc, char *argv[]) {
     ConsumerContext ctx = {
-        .current_offset = cargar_offset(),
+        .current_offset = 0, //cargar_offset()
         .shutdown_flag = 0
     };
     
@@ -312,11 +323,6 @@ int main(int argc, char *argv[]) {
     set_nonblocking(ctx.socket_cliente);
     set_socket_timeout(ctx.socket_cliente);
 
-    // Registro inicial
-    char init_msg[64];
-    snprintf(init_msg, sizeof(init_msg), "OFFSET=%ld", ctx.current_offset);
-    send(ctx.socket_cliente, init_msg, strlen(init_msg), 0);
-
     // Configurar señales
     global_ctx = &ctx;
     setup_signal_handlers();
@@ -332,14 +338,7 @@ int main(int argc, char *argv[]) {
 
     // Limpieza final
     printf("Realizando limpieza final...\n");
-    Node *current = ctx.cola->front;
-    while (current) {
-        Node *next = current->next;
-        free(current->data);
-        free(current);
-        current = next;
-    }
-    free(ctx.cola);
+    freeQueue(ctx.cola);
     close(ctx.socket_cliente);
     pthread_mutex_destroy(&ctx.offset_mutex);
     pthread_mutex_destroy(&ctx.shutdown_mutex);
