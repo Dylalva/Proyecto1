@@ -46,9 +46,8 @@ typedef struct Queue {
 typedef struct {
     int socket_cliente;
     Queue *cola;
-    long current_offset;
-    pthread_mutex_t offset_mutex;
     pthread_mutex_t shutdown_mutex;
+    pthread_mutex_t socket_mutex;
     int shutdown_flag;
 } ConsumerContext;
 
@@ -140,55 +139,22 @@ void *dequeue(Queue *queue) {
 }
 
 // -------------------------
-// Funciones de Persistencia
-// -------------------------
-long cargar_offset() {
-    const char* filename = "offset.log";
-    
-    FILE* file = fopen(filename, "r");
-    long offset = 0;
-    if (file) {
-        fscanf(file, "%ld", &offset);
-        fclose(file);
-    }
-    return offset;
-}
-
-//============================================================================
-
-void guardar_offset(long offset) {
-    const char* filename = "offset.log";
-    const char* tmpfile = "offset.tmp";
-
-    FILE* file = fopen(tmpfile, "w");
-    if (!file) {
-        perror("Error creando archivo temporal");
-        return;
-    }
-
-    fprintf(file, "%ld", offset);
-    fclose(file);
-    
-    if (rename(tmpfile, filename) != 0) {
-        perror("Error renombrando archivo");
-        remove(tmpfile);
-    }
-}
-
-// -------------------------
 // Hilos de Trabajo 
 // -------------------------
 void *receiver_thread(void *arg) {
     ConsumerContext *ctx = (ConsumerContext *)arg;
     Message msg;
-    struct pollfd fds[1];   // poll para un socket
-    int timeout_ms = 1000; // 1 segundo
+    struct pollfd fds[1];
+    int timeout_ms = 1000;
 
+    pthread_mutex_lock(&ctx->socket_mutex);
     fds[0].fd = ctx->socket_cliente;
+    pthread_mutex_unlock(&ctx->socket_mutex);
+
     fds[0].events = POLLIN;
 
     while (1) {
-        // Verificar shutdown sin bloquear
+        // Verificar shutdown
         pthread_mutex_lock(&ctx->shutdown_mutex);
         if (ctx->shutdown_flag) {
             pthread_mutex_unlock(&ctx->shutdown_mutex);
@@ -199,10 +165,24 @@ void *receiver_thread(void *arg) {
         int ret = poll(fds, 1, timeout_ms);
         
         if (ret > 0) {
-            if (fds[0].revents & POLLIN) {
-                // Procesar datos
+            pthread_mutex_lock(&ctx->socket_mutex);
+            int current_fd = ctx->socket_cliente;
+            pthread_mutex_unlock(&ctx->socket_mutex);
+
+            if (current_fd == -1) break; // Socket cerrado
+
+            if (fds[0].revents & (POLLIN | POLLHUP | POLLERR)) {
+                if (fds[0].revents & POLLHUP) {
+                    printf("Conexión cerrada por el broker\n");
+                    goto cleanup;
+                }
+                if (fds[0].revents & POLLERR) {
+                    perror("Error en el socket");
+                    goto cleanup;
+                }
+
                 ssize_t bytes;
-                while ((bytes = recv(ctx->socket_cliente, &msg, sizeof(Message), 0))) {
+                while ((bytes = recv(current_fd, &msg, sizeof(Message), 0))) {
                     if (bytes > 0) {
                         Message *msg_copy = malloc(sizeof(Message));
                         memcpy(msg_copy, &msg, sizeof(Message));
@@ -224,15 +204,18 @@ void *receiver_thread(void *arg) {
             perror("Error en poll()");
             break;
         }
-        // Timeout: volver a verificar shutdown
     }
 
-    cleanup:
-    close(ctx->socket_cliente);
+cleanup:
+    pthread_mutex_lock(&ctx->socket_mutex);
+    if (ctx->socket_cliente != -1) {
+        close(ctx->socket_cliente);
+        ctx->socket_cliente = -1;
+    }
+    pthread_mutex_unlock(&ctx->socket_mutex);
     printf("Hilo receptor finalizado\n");
     return NULL;
 }
-
 //============================================================================
 
 void *processor_thread(void *arg) {
@@ -252,15 +235,6 @@ void *processor_thread(void *arg) {
         printf("\n[Offset: %ld] Origen: %s\nMessage: %s\n", 
               msg->offset, msg->origen, msg->message);
             
-        pthread_mutex_lock(&ctx->offset_mutex);
-        ctx->current_offset = msg->offset + 1;
-        //guardar_offset(ctx->current_offset);
-        
-        char ack_msg[64];
-        snprintf(ack_msg, sizeof(ack_msg), "ACK=%ld", msg->offset);
-        send(ctx->socket_cliente, ack_msg, strlen(ack_msg), 0);
-        pthread_mutex_unlock(&ctx->offset_mutex);
-        
         free(msg);
     }
     printf("Hilo procesador finalizado\n");
@@ -300,13 +274,12 @@ void setup_signal_handlers() {
 // -------------------------
 int main(int argc, char *argv[]) {
     ConsumerContext ctx = {
-        .current_offset = 0, //cargar_offset()
         .shutdown_flag = 0
     };
     
     ctx.cola = initQueue();
-    pthread_mutex_init(&ctx.offset_mutex, NULL);
     pthread_mutex_init(&ctx.shutdown_mutex, NULL);
+    pthread_mutex_init(&ctx.socket_mutex, NULL);
 
     // Configuración del socket
     ctx.socket_cliente = socket(AF_INET, SOCK_STREAM, 0);
@@ -340,8 +313,8 @@ int main(int argc, char *argv[]) {
     printf("Realizando limpieza final...\n");
     freeQueue(ctx.cola);
     close(ctx.socket_cliente);
-    pthread_mutex_destroy(&ctx.offset_mutex);
     pthread_mutex_destroy(&ctx.shutdown_mutex);
+    pthread_mutex_destroy(&ctx.socket_mutex);
 
     printf("Consumer detenido correctamente\n");
     return EXIT_SUCCESS;

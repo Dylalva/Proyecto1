@@ -7,6 +7,8 @@
 #include <pthread.h>
 #include <semaphore.h>
 #include <signal.h>
+#include <fcntl.h>
+#include <sys/select.h>
 // --------------------
 // Estructuras y cola
 // --------------------
@@ -42,10 +44,12 @@ typedef struct {
 
 typedef struct {
     Consumer **consumers;
+    long offset_group;
     int count;
     int capacity;
     int consumer_index;
     pthread_t thread_group;
+    pthread_mutex_t group_mutex; // Mutex para proteger el acceso al grupo
 } ConsumerGroup;
 
 typedef struct ConsumerGroupNode {
@@ -155,10 +159,12 @@ void freeQueue(Queue *queue) {
 
 ConsumerGroup *initConsumerGroup() {
     ConsumerGroup *list = malloc(sizeof(ConsumerGroup));
+    list->offset_group = 0;
     list->count = 0;
     list->capacity = 5; // Máximo de 5 consumidores por grupo
     list->consumer_index = 0;
     list->consumers = malloc(sizeof(Consumer *) * list->capacity);
+    pthread_mutex_init(&list->group_mutex, NULL);
     return list;
 }
 
@@ -274,27 +280,104 @@ void sendMessageConsumers(Message *msg) {
         ConsumerGroupNode *next = currentNode->next;
         ConsumerGroup *group = currentNode->group;
 
+        pthread_mutex_lock(&group->group_mutex);  // Lock grupal
+
         if (group->count > 0) {
             // Seleccionar un consumidor aleatorio
             if(group->consumer_index >= group->count) {
                 group->consumer_index = 0;
             }
-            Consumer *consumer = group->consumers[group->consumer_index++];
+            Consumer *consumer = group->consumers[group->consumer_index];
+            
+            // Se incrementa el valor del offset del grupo
+            msg->offset = group->offset_group;
 
-            if (send(consumer->socket_fd, msg, sizeof(Message), 0) < 0) {
+            ssize_t bytes = send(consumer->socket_fd, msg, sizeof(Message), 0);
+
+            if (bytes < 0) {
                 perror("Error al enviar el mensaje al consumer");
-                pthread_mutex_unlock(&consumerGroups->mutex);
+                pthread_mutex_lock(&consumerGroups->mutex);
                 deleteConsumer(consumerGroups, consumer->id);
+                pthread_mutex_unlock(&consumerGroups->mutex);
+                continue;
             } else {
                 printf("Mensaje enviado al Consumer ID: %d\n", consumer->id);
+                group->consumer_index = (group->consumer_index + 1) % group->count;
+                group->offset_group++;
             }
-        }
 
+        }
+        pthread_mutex_unlock(&group->group_mutex); // Desbloquear el mutex del grupo
         currentNode = next;
     }
 
     pthread_mutex_unlock(&consumer_mutex);
 }
+
+// función con send() no bloqueante
+// #include <fcntl.h>
+// #include <sys/select.h>
+
+// void sendMessageConsumers(Message *msg) {
+//     pthread_mutex_lock(&consumer_mutex);
+
+//     ConsumerGroupNode *currentNode = consumerGroups->head;
+//     while (currentNode) {
+//         ConsumerGroupNode *next = currentNode->next;
+//         ConsumerGroup *group = currentNode->group;
+
+//         pthread_mutex_lock(&group->group_mutex);
+
+//         // Capturar valores críticos bajo mutex
+//         int current_count = group->count;
+//         if (current_count > 0) {
+//             int current_index = group->consumer_index % current_count; // Índice seguro
+//             Consumer *consumer = group->consumers[current_index];
+//             int consumer_fd = consumer->socket_fd;
+
+//             // Configurar socket como no bloqueante
+//             int flags = fcntl(consumer_fd, F_GETFL, 0);
+//             fcntl(consumer_fd, F_SETFL, flags | O_NONBLOCK);
+
+//             // Timeout para send()
+//             fd_set write_fds;
+//             FD_ZERO(&write_fds);
+//             FD_SET(consumer_fd, &write_fds);
+//             struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
+//             int ret = select(consumer_fd + 1, NULL, &write_fds, NULL, &tv);
+
+//             msg->offset = group->offset_group;
+
+//             ssize_t bytes = -1;
+//             if (ret > 0) bytes = send(consumer_fd, msg, sizeof(Message), 0);
+
+//             // Restaurar flags del socket
+//             fcntl(consumer_fd, F_SETFL, flags);
+
+//             if (bytes < 0) {
+//                 perror("Error al enviar");
+//                 pthread_mutex_unlock(&group->group_mutex);
+//                 pthread_mutex_unlock(&consumer_mutex);
+
+//                 deleteConsumer(consumerGroups, consumer->id); // Asume que maneja su propio locking
+
+//                 pthread_mutex_lock(&consumer_mutex);
+//                 currentNode = consumerGroups->head; // Reinicio seguro
+//                 continue;
+//             } else {
+//                 group->consumer_index = (current_index + 1) % current_count;
+//                 group->offset_group++;
+//                 printf("Mensaje enviado a Consumer ID: %d\n", consumer->id);
+//             }
+//         }
+
+//         pthread_mutex_unlock(&group->group_mutex);
+//         currentNode = next;
+//     }
+
+//     pthread_mutex_unlock(&consumer_mutex);
+// }
+
 // --------------------
 // Manejo de conexiones
 // --------------------
