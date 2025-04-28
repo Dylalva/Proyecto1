@@ -2,7 +2,7 @@
 
 # Nombre del archivo fuente y ejecutable
 SOURCE_FILE="Broker.c"
-EXECUTABLE="broker"
+EXECUTABLE="Broker"
 
 # Directorio del proyecto
 PROJECT_DIR="/home/david/Documents/GitHub/Proyecto1/src"

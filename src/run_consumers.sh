@@ -2,7 +2,7 @@
 
 # Nombre del archivo fuente y ejecutable
 SOURCE_FILE="Consumer.c"
-EXECUTABLE="consumer"
+EXECUTABLE="Consumer"
 
 # Directorio del proyecto
 PROJECT_DIR="/home/david/Documents/GitHub/Proyecto1/src"

@@ -2,7 +2,7 @@
 
 # Nombre del archivo fuente y ejecutable
 SOURCE_FILE="Producer.c"
-EXECUTABLE="producer"
+EXECUTABLE="Producer"
 
 # Directorio del proyecto
 PROJECT_DIR="/home/david/Documents/GitHub/Proyecto1/src"
@@ -24,7 +24,7 @@ echo "Ejecutando 100 instancias del productor..."
 for i in {1..100}; do
     echo "Iniciando Producer $i..."
     ./"$EXECUTABLE" &
-    sleep 1
+    sleep 0.3
 done
 
 echo "Se han iniciado 100 productores."
