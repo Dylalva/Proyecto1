@@ -21,7 +21,7 @@ echo "Compilación exitosa."
 
 # Ejecutar 10 instancias del consumidor en pestañas separadas
 echo "Ejecutando 10 instancias del consumidor en pestañas separadas..."
-for i in {1..10}; do
+for i in {1..4}; do
     gnome-terminal --tab --title="Consumer $i" -- bash -c "./$EXECUTABLE; exec bash"
 done
 

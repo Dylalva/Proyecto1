@@ -9,6 +9,7 @@
 #include <signal.h>
 #include <fcntl.h>
 #include <sys/select.h>
+#include <sys/wait.h> // Para waitpid
 #include <time.h>
 
 // --------------------
@@ -81,6 +82,7 @@ ConsumerGroupContainer *consumerGroups;
 // --------------------
 
 // Funciones de la cola
+void sigchld_handler(int sig); // Declaración de la función sigchld_handler
 Queue *initQueue();
 void enqueue(Queue *queue, void *data);
 void *dequeue(Queue *queue);
@@ -118,7 +120,9 @@ int is_broker_active();
 
 int main() {
     signal(SIGPIPE, SIG_IGN); // Ignorar señales SIGPIPE
-    pid_t broker_pid = -1;   // PID del proceso broker
+    signal(SIGCHLD, sigchld_handler); // Manejar la señal SIGCHLD
+
+    pid_t broker_pid = -1; // PID del proceso broker
 
     while (1) {
         if (!is_broker_active()) {
@@ -664,5 +668,14 @@ int is_broker_active() {
     } else {
         perror("Error inesperado al verificar el puerto");
         exit(EXIT_FAILURE);
+    }
+}
+
+void sigchld_handler(int sig) {
+    (void)sig; // Evitar advertencias por no usar el parámetro
+
+    // Limpiar todos los procesos hijos terminados
+    while (waitpid(-1, NULL, WNOHANG) > 0) {
+        // No hacer nada, solo limpiar los procesos hijos
     }
 }
