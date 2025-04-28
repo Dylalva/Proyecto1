@@ -12,17 +12,21 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <poll.h>
-#include <sys/time.h>  // Para struct timeval
-#include <signal.h>    // Para manejo de señales
+#include <sys/time.h>
+#include <signal.h>
 
-
+// -------------------------
 // Definiciones de constantes
+// -------------------------
 #define MAX_FILENAME_LEN   256
 #define MAX_TMPFILE_LEN    (MAX_FILENAME_LEN + 4)
 #define QUEUE_CAPACITY     100
 #define SOCKET_TIMEOUT_SEC 2
+#define RECONNECT_TIMEOUT  30 // Tiempo máximo para intentar reconexión (en segundos)
 
+// -------------------------
 // Estructuras de Datos
+// -------------------------
 typedef struct {
     long offset;
     int id;
@@ -51,12 +55,112 @@ typedef struct {
     int shutdown_flag;
 } ConsumerContext;
 
-// Variable global para manejo de señales
+// -------------------------
+// Declaraciones de funciones
+// -------------------------
+
+// Funciones de utilidad
+void handle_error(const char *msg, int fatal);
+void set_nonblocking(int sockfd);
+void set_socket_timeout(int sockfd);
+int reconnect_to_broker(ConsumerContext *ctx, struct sockaddr_in *broker_addr);
+
+// Funciones de la cola
+Queue *initQueue();
+void freeQueue(Queue *queue);
+void enqueue(Queue *queue, void *data);
+void *dequeue(Queue *queue);
+
+// Hilos de trabajo
+void *receiver_thread(void *arg);
+void *processor_thread(void *arg);
+
+// Manejo de señales
+void shutdown_handler(int sig);
+void setup_signal_handlers();
+
+// -------------------------
+// Variable global
+// -------------------------
 static ConsumerContext *global_ctx = NULL;
 
 // -------------------------
-// Funciones de Utilidad
+// Función principal
 // -------------------------
+int main(int argc, char *argv[]) {
+    ConsumerContext ctx = {
+        .shutdown_flag = 0
+    };
+    
+    ctx.cola = initQueue();
+    pthread_mutex_init(&ctx.shutdown_mutex, NULL);
+    pthread_mutex_init(&ctx.socket_mutex, NULL);
+
+    // Configuración del socket
+    struct sockaddr_in broker_addr = {
+        .sin_family = AF_INET,
+        .sin_port = htons(8082),
+        .sin_addr.s_addr = INADDR_ANY
+    };
+
+    time_t start_time = time(NULL);
+    while (1) {
+        ctx.socket_cliente = socket(AF_INET, SOCK_STREAM, 0);
+        if (ctx.socket_cliente < 0) {
+            perror("Error al crear el socket");
+            sleep(1);
+            continue;
+        }
+
+        if (connect(ctx.socket_cliente, (struct sockaddr*)&broker_addr, sizeof(broker_addr)) == 0) {
+            printf("Conexión inicial establecida con el broker.\n");
+            printf("Consumer conectado exitosamente al broker en el puerto 8082.\n");
+            break; // Salir del bucle si la conexión es exitosa
+        }
+
+        perror("Error al conectar con el broker. Reintentando...");
+        close(ctx.socket_cliente);
+
+        if (time(NULL) - start_time >= RECONNECT_TIMEOUT) {
+            fprintf(stderr, "No se pudo conectar con el broker después de %d segundos. Terminando el proceso.\n", RECONNECT_TIMEOUT);
+            exit(EXIT_FAILURE);
+        }
+
+        sleep(1); // Esperar 1 segundo antes de reintentar
+    }
+
+    set_nonblocking(ctx.socket_cliente);
+    set_socket_timeout(ctx.socket_cliente);
+
+    // Configurar señales
+    global_ctx = &ctx;
+    setup_signal_handlers();
+
+    // Iniciar hilos
+    pthread_t threads[2];
+    pthread_create(&threads[0], NULL, receiver_thread, &ctx);
+    pthread_create(&threads[1], NULL, processor_thread, &ctx);
+
+    // Esperar finalización
+    pthread_join(threads[0], NULL);
+    pthread_join(threads[1], NULL);
+
+    // Limpieza final
+    printf("Realizando limpieza final...\n");
+    freeQueue(ctx.cola);
+    close(ctx.socket_cliente);
+    pthread_mutex_destroy(&ctx.shutdown_mutex);
+    pthread_mutex_destroy(&ctx.socket_mutex);
+
+    printf("Consumer detenido correctamente\n");
+    return EXIT_SUCCESS;
+}
+
+// -------------------------
+// Definiciones de funciones
+// -------------------------
+
+// Funciones de utilidad
 void handle_error(const char *msg, int fatal) {
     perror(msg);
     if (fatal) exit(EXIT_FAILURE);
@@ -74,9 +178,43 @@ void set_socket_timeout(int sockfd) {
     setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 }
 
-// -------------------------
-// Funciones de la Cola
-// -------------------------
+int reconnect_to_broker(ConsumerContext *ctx, struct sockaddr_in *broker_addr) {
+    time_t start_time = time(NULL);
+    while (time(NULL) - start_time < RECONNECT_TIMEOUT) {
+        printf("Intentando reconectar con el broker...\n");
+
+        int new_socket = socket(AF_INET, SOCK_STREAM, 0);
+        if (new_socket < 0) {
+            perror("Error al crear el socket");
+            sleep(1);
+            continue;
+        }
+
+        if (connect(new_socket, (struct sockaddr *)broker_addr, sizeof(*broker_addr)) == 0) {
+            printf("Reconexión exitosa con el broker.\n");
+
+            pthread_mutex_lock(&ctx->socket_mutex);
+            if (ctx->socket_cliente != -1) {
+                close(ctx->socket_cliente);
+            }
+            ctx->socket_cliente = new_socket;
+            pthread_mutex_unlock(&ctx->socket_mutex);
+
+            set_nonblocking(ctx->socket_cliente);
+            set_socket_timeout(ctx->socket_cliente);
+            return 1; // Reconexión exitosa
+        }
+
+        perror("Error al reconectar con el broker");
+        close(new_socket);
+        sleep(1);
+    }
+
+    printf("No se pudo reconectar con el broker después de %d segundos.\n", RECONNECT_TIMEOUT);
+    return 0; // Reconexión fallida
+}
+
+// Funciones de la cola
 Queue *initQueue() {    
     Queue *queue = malloc(sizeof(Queue));    
     queue->front = NULL;    
@@ -138,23 +276,20 @@ void *dequeue(Queue *queue) {
     return data;
 }
 
-// -------------------------
-// Hilos de Trabajo 
-// -------------------------
+// Hilos de trabajo
 void *receiver_thread(void *arg) {
     ConsumerContext *ctx = (ConsumerContext *)arg;
     Message msg;
     struct pollfd fds[1];
     int timeout_ms = 1000;
 
-    pthread_mutex_lock(&ctx->socket_mutex);
-    fds[0].fd = ctx->socket_cliente;
-    pthread_mutex_unlock(&ctx->socket_mutex);
-
-    fds[0].events = POLLIN;
+    struct sockaddr_in broker_addr = {
+        .sin_family = AF_INET,
+        .sin_port = htons(8082),
+        .sin_addr.s_addr = INADDR_ANY
+    };
 
     while (1) {
-        // Verificar shutdown
         pthread_mutex_lock(&ctx->shutdown_mutex);
         if (ctx->shutdown_flag) {
             pthread_mutex_unlock(&ctx->shutdown_mutex);
@@ -162,42 +297,28 @@ void *receiver_thread(void *arg) {
         }
         pthread_mutex_unlock(&ctx->shutdown_mutex);
 
+        pthread_mutex_lock(&ctx->socket_mutex);
+        fds[0].fd = ctx->socket_cliente;
+        pthread_mutex_unlock(&ctx->socket_mutex);
+
+        fds[0].events = POLLIN;
+
         int ret = poll(fds, 1, timeout_ms);
-        
         if (ret > 0) {
-            pthread_mutex_lock(&ctx->socket_mutex);
-            int current_fd = ctx->socket_cliente;
-            pthread_mutex_unlock(&ctx->socket_mutex);
-
-            if (current_fd == -1) break; // Socket cerrado
-
-            if (fds[0].revents & (POLLIN | POLLHUP | POLLERR)) {
-                if (fds[0].revents & POLLHUP) {
-                    printf("Conexión cerrada por el broker\n");
-                    goto cleanup;
-                }
-                if (fds[0].revents & POLLERR) {
-                    perror("Error en el socket");
-                    goto cleanup;
-                }
-
-                ssize_t bytes;
-                while ((bytes = recv(current_fd, &msg, sizeof(Message), 0))) {
-                    if (bytes > 0) {
-                        Message *msg_copy = malloc(sizeof(Message));
-                        memcpy(msg_copy, &msg, sizeof(Message));
-                        enqueue(ctx->cola, msg_copy);
-                        printf("[Receptor] Mensaje recibido - Offset: %ld\n", msg.offset);
-                    } else if (bytes == 0) {
-                        printf("Conexión cerrada por el broker\n");
-                        goto cleanup;
-                    } else {
-                        if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                            perror("Error en recepción");
-                            goto cleanup;
-                        }
+            if (fds[0].revents & POLLIN) {
+                ssize_t bytes = recv(fds[0].fd, &msg, sizeof(Message), 0);
+                if (bytes > 0) {
+                    Message *msg_copy = malloc(sizeof(Message));
+                    memcpy(msg_copy, &msg, sizeof(Message));
+                    enqueue(ctx->cola, msg_copy);
+                    printf("[Receptor] Mensaje recibido - Offset: %ld\n", msg.offset);
+                } else if (bytes == 0) {
+                    printf("Conexión cerrada por el broker. Intentando reconexión...\n");
+                    if (!reconnect_to_broker(ctx, &broker_addr)) {
                         break;
                     }
+                } else {
+                    perror("Error en recepción");
                 }
             }
         } else if (ret < 0) {
@@ -206,17 +327,9 @@ void *receiver_thread(void *arg) {
         }
     }
 
-cleanup:
-    pthread_mutex_lock(&ctx->socket_mutex);
-    if (ctx->socket_cliente != -1) {
-        close(ctx->socket_cliente);
-        ctx->socket_cliente = -1;
-    }
-    pthread_mutex_unlock(&ctx->socket_mutex);
     printf("Hilo receptor finalizado\n");
     return NULL;
 }
-//============================================================================
 
 void *processor_thread(void *arg) {
     ConsumerContext *ctx = (ConsumerContext *)arg;
@@ -241,9 +354,7 @@ void *processor_thread(void *arg) {
     return NULL;
 }
 
-// -------------------------
-// Manejo de Señales
-// -------------------------
+// Manejo de señales
 void shutdown_handler(int sig) {
     printf("\nRecibida señal %d. Iniciando cierre seguro...\n", sig);
     
@@ -267,55 +378,4 @@ void setup_signal_handlers() {
     
     sigaction(SIGINT, &sa, NULL);   // Ctrl+C
     sigaction(SIGTERM, &sa, NULL);  // kill
-}
-
-// -------------------------
-// Función Principal
-// -------------------------
-int main(int argc, char *argv[]) {
-    ConsumerContext ctx = {
-        .shutdown_flag = 0
-    };
-    
-    ctx.cola = initQueue();
-    pthread_mutex_init(&ctx.shutdown_mutex, NULL);
-    pthread_mutex_init(&ctx.socket_mutex, NULL);
-
-    // Configuración del socket
-    ctx.socket_cliente = socket(AF_INET, SOCK_STREAM, 0);
-    struct sockaddr_in broker_addr = {
-        .sin_family = AF_INET,
-        .sin_port = htons(8082),
-        .sin_addr.s_addr = INADDR_ANY
-    };
-    
-    if (connect(ctx.socket_cliente, (struct sockaddr*)&broker_addr, sizeof(broker_addr)) < 0) {
-        handle_error("Error de conexión", 1);
-    }
-
-    set_nonblocking(ctx.socket_cliente);
-    set_socket_timeout(ctx.socket_cliente);
-
-    // Configurar señales
-    global_ctx = &ctx;
-    setup_signal_handlers();
-
-    // Iniciar hilos
-    pthread_t threads[2];
-    pthread_create(&threads[0], NULL, receiver_thread, &ctx);
-    pthread_create(&threads[1], NULL, processor_thread, &ctx);
-
-    // Esperar finalización
-    pthread_join(threads[0], NULL);
-    pthread_join(threads[1], NULL);
-
-    // Limpieza final
-    printf("Realizando limpieza final...\n");
-    freeQueue(ctx.cola);
-    close(ctx.socket_cliente);
-    pthread_mutex_destroy(&ctx.shutdown_mutex);
-    pthread_mutex_destroy(&ctx.socket_mutex);
-
-    printf("Consumer detenido correctamente\n");
-    return EXIT_SUCCESS;
 }
