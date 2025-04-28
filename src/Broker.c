@@ -9,6 +9,8 @@
 #include <signal.h>
 #include <fcntl.h>
 #include <sys/select.h>
+#include <time.h>
+
 // --------------------
 // Estructuras y cola
 // --------------------
@@ -23,11 +25,6 @@ typedef struct Queue {
     Node *rear;
     int size;
 } Queue;
-
-
-// --------------------
-// Estructuras de mensaje y consumers/producers
-// --------------------
 
 typedef struct {
     long offset;
@@ -62,7 +59,6 @@ typedef struct {
     pthread_mutex_t mutex;
 } ConsumerGroupContainer;
 
-
 // --------------------
 // Variables globales
 // --------------------
@@ -79,6 +75,93 @@ pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER; // Mutex para proteger el
 #define MAX_QUEUE_SIZE 1000 // Límite máximo de mensajes en la cola
 sem_t cola_sem; // Semáforo para controlar el tamaño de la cola
 ConsumerGroupContainer *consumerGroups;
+
+// --------------------
+// Declaraciones de funciones
+// --------------------
+
+// Funciones de la cola
+Queue *initQueue();
+void enqueue(Queue *queue, void *data);
+void *dequeue(Queue *queue);
+int isEmpty(Queue *queue);
+void freeQueue(Queue *queue);
+
+// Funciones para manejar listas
+ConsumerGroup *initConsumerGroup();
+void addConsumer(ConsumerGroup *list, Consumer *consumer);
+ConsumerGroupContainer *initConsumerGroupContainer();
+void addConsumerGroup(ConsumerGroupContainer *container, ConsumerGroup *group);
+void deleteConsumer(ConsumerGroupContainer *container, int consumer_id);
+
+// Funciones de manejo de mensajes
+void printQueue(Queue *queue);
+void printConsumers();
+void sendMessageConsumers(Message *msg);
+
+// Funciones de manejo de conexiones
+void *handlerConnProducer(void *arg);
+void *handlerSendMessage(void *arg);
+void *handlerConnConsumer(void *arg);
+void *handlerThreadProducer(void *arg);
+void *handlerThreadConsumer(void *arg);
+
+// Función principal del broker
+void init_broker();
+
+// Mecanismo de failover
+int is_broker_active();
+
+// --------------------
+// Función principal
+// --------------------
+
+int main() {
+    signal(SIGPIPE, SIG_IGN); // Ignorar señales SIGPIPE
+    pid_t broker_pid = -1;   // PID del proceso broker
+
+    while (1) {
+        if (!is_broker_active()) {
+            if (broker_pid == -1) { // Solo crear un nuevo broker si no hay uno en ejecución
+                printf("No hay broker activo. Iniciando uno nuevo...\n");
+
+                broker_pid = fork(); // Crear un proceso hijo
+                if (broker_pid < 0) {
+                    perror("Error al crear el proceso broker");
+                    exit(EXIT_FAILURE);
+                }
+
+                if (broker_pid == 0) {
+                    // Proceso hijo: ejecutar el broker
+                    init_broker();
+                    exit(EXIT_SUCCESS); // Salir cuando el broker termine
+                } else {
+                    // Proceso padre: continuar como monitor
+                    printf("Broker iniciado con PID: %d\n", broker_pid);
+                }
+            }
+        } else {
+            printf("Broker ya está activo. Verificando nuevamente en 5 segundos...\n");
+        }
+
+        // Esperar 5 segundos antes de verificar nuevamente
+        sleep(5);
+
+        // Verificar si el proceso broker sigue activo
+        if (broker_pid > 0 && kill(broker_pid, 0) != 0) {
+            printf("El proceso broker con PID %d ha terminado.\n", broker_pid);
+            broker_pid = -1; // Resetear el PID del broker
+        }
+    }
+
+    return 0;
+}
+
+// --------------------
+// Definiciones de funciones
+// --------------------
+
+// Funciones de la cola
 Queue *initQueue() {
     Queue *queue = (Queue *)malloc(sizeof(Queue));
     if (!queue) {
@@ -92,7 +175,6 @@ Queue *initQueue() {
 }
 
 void enqueue(Queue *queue, void *data) {
-
     sem_wait(&cola_sem);
     pthread_mutex_lock(&cola_mutex);
 
@@ -153,10 +235,7 @@ void freeQueue(Queue *queue) {
     free(queue);
 }
 
-// --------------------
 // Funciones para manejar listas
-// --------------------
-
 ConsumerGroup *initConsumerGroup() {
     ConsumerGroup *list = malloc(sizeof(ConsumerGroup));
     list->offset_group = 0;
@@ -193,37 +272,6 @@ void addConsumerGroup(ConsumerGroupContainer *container, ConsumerGroup *group) {
 
     pthread_mutex_unlock(&container->mutex);
 }
-
-// --------------------
-// Funciones de manejo de mensajes
-// --------------------
-
-void printQueue(Queue *queue) {
-    pthread_mutex_lock(&cola_mutex);
-    printf("\n--- Mensajes en la Cola ---\n");
-    Node *current = queue->front;
-    while (current) {
-        Message *msg = (Message *)current->data;
-        printf("ID: %d | Origen: %s | Contenido: %s\n", msg->id, msg->origen, msg->mensaje);
-        current = current->next;
-    }
-    printf("---------------------------\n");
-    pthread_mutex_unlock(&cola_mutex);
-}
-
-void printConsumers() {
-    ConsumerGroupNode *node = consumerGroups->head;
-    int cont = 0;
-    while (node) {
-        ConsumerGroup *group = node->group;
-        printf("\n--- Grupo de Consumidores : %d ---\n", cont++);
-        for (int i = 0; i < group->count; i++) {
-            printf("Consumer ID: %d | Socket FD: %d\n", group->consumers[i]->id, group->consumers[i]->socket_fd);
-        }
-        node = node->next;
-    }
-}
-//============================================================================
 
 void deleteConsumer(ConsumerGroupContainer *container, int consumer_id) {
     pthread_mutex_lock(&container->mutex);
@@ -270,7 +318,32 @@ void deleteConsumer(ConsumerGroupContainer *container, int consumer_id) {
     pthread_mutex_unlock(&container->mutex);
 }
 
-//============================================================================
+// Funciones de manejo de mensajes
+void printQueue(Queue *queue) {
+    pthread_mutex_lock(&cola_mutex);
+    printf("\n--- Mensajes en la Cola ---\n");
+    Node *current = queue->front;
+    while (current) {
+        Message *msg = (Message *)current->data;
+        printf("ID: %d | Origen: %s | Contenido: %s\n", msg->id, msg->origen, msg->mensaje);
+        current = current->next;
+    }
+    printf("---------------------------\n");
+    pthread_mutex_unlock(&cola_mutex);
+}
+
+void printConsumers() {
+    ConsumerGroupNode *node = consumerGroups->head;
+    int cont = 0;
+    while (node) {
+        ConsumerGroup *group = node->group;
+        printf("\n--- Grupo de Consumidores : %d ---\n", cont++);
+        for (int i = 0; i < group->count; i++) {
+            printf("Consumer ID: %d | Socket FD: %d\n", group->consumers[i]->id, group->consumers[i]->socket_fd);
+        }
+        node = node->next;
+    }
+}
 
 void sendMessageConsumers(Message *msg) {
     pthread_mutex_lock(&consumer_mutex);
@@ -314,74 +387,7 @@ void sendMessageConsumers(Message *msg) {
     pthread_mutex_unlock(&consumer_mutex);
 }
 
-// función con send() no bloqueante
-// #include <fcntl.h>
-// #include <sys/select.h>
-
-// void sendMessageConsumers(Message *msg) {
-//     pthread_mutex_lock(&consumer_mutex);
-
-//     ConsumerGroupNode *currentNode = consumerGroups->head;
-//     while (currentNode) {
-//         ConsumerGroupNode *next = currentNode->next;
-//         ConsumerGroup *group = currentNode->group;
-
-//         pthread_mutex_lock(&group->group_mutex);
-
-//         // Capturar valores críticos bajo mutex
-//         int current_count = group->count;
-//         if (current_count > 0) {
-//             int current_index = group->consumer_index % current_count; // Índice seguro
-//             Consumer *consumer = group->consumers[current_index];
-//             int consumer_fd = consumer->socket_fd;
-
-//             // Configurar socket como no bloqueante
-//             int flags = fcntl(consumer_fd, F_GETFL, 0);
-//             fcntl(consumer_fd, F_SETFL, flags | O_NONBLOCK);
-
-//             // Timeout para send()
-//             fd_set write_fds;
-//             FD_ZERO(&write_fds);
-//             FD_SET(consumer_fd, &write_fds);
-//             struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
-//             int ret = select(consumer_fd + 1, NULL, &write_fds, NULL, &tv);
-
-//             msg->offset = group->offset_group;
-
-//             ssize_t bytes = -1;
-//             if (ret > 0) bytes = send(consumer_fd, msg, sizeof(Message), 0);
-
-//             // Restaurar flags del socket
-//             fcntl(consumer_fd, F_SETFL, flags);
-
-//             if (bytes < 0) {
-//                 perror("Error al enviar");
-//                 pthread_mutex_unlock(&group->group_mutex);
-//                 pthread_mutex_unlock(&consumer_mutex);
-
-//                 deleteConsumer(consumerGroups, consumer->id); // Asume que maneja su propio locking
-
-//                 pthread_mutex_lock(&consumer_mutex);
-//                 currentNode = consumerGroups->head; // Reinicio seguro
-//                 continue;
-//             } else {
-//                 group->consumer_index = (current_index + 1) % current_count;
-//                 group->offset_group++;
-//                 printf("Mensaje enviado a Consumer ID: %d\n", consumer->id);
-//             }
-//         }
-
-//         pthread_mutex_unlock(&group->group_mutex);
-//         currentNode = next;
-//     }
-
-//     pthread_mutex_unlock(&consumer_mutex);
-// }
-
-// --------------------
-// Manejo de conexiones
-// --------------------
-
+// Funciones de manejo de conexiones
 void *handlerConnProducer(void *arg) {
     int socket_cliente = *(int *)arg;
     free(arg);
@@ -508,10 +514,6 @@ void *handlerConnConsumer(void *arg) {
     pthread_exit(NULL);
 }
 
-// --------------------
-// Hilos para manejar conexiones
-// --------------------
-
 void *handlerThreadProducer(void *arg) {
     int socket_servidor = *(int *)arg;
     while (1) {
@@ -561,10 +563,6 @@ void *handlerThreadConsumer(void *arg) {
         }
     }
 }
-
-// --------------------
-// Función principal del broker
-// --------------------
 
 void init_broker() {
     int socket_producers, socket_consumers;
@@ -641,45 +639,30 @@ void init_broker() {
     close(socket_producers);
     close(socket_consumers);
 }
-    
 
-// --------------------
-// Mecanismo de failover
-// --------------------
-
-int main() {
-    signal(SIGPIPE, SIG_IGN);
-    int intento = 0;
-    srand(time(NULL));
-    while (1) {
-        int socket_prueba = socket(AF_INET, SOCK_STREAM, 0);
-        if (socket_prueba < 0) {
-            perror("Error creando socket de prueba");
-            exit(EXIT_FAILURE);
-        }
-
-        struct sockaddr_in direccion;
-        direccion.sin_family = AF_INET;
-        direccion.sin_port = htons(8080);
-        direccion.sin_addr.s_addr = INADDR_ANY;
-
-        if (bind(socket_prueba, (struct sockaddr *)&direccion, sizeof(direccion)) == 0) {
-            close(socket_prueba);
-            printf("Este broker asume el rol ACTIVO en el intento #%d\n", intento + 1);
-            init_broker();
-            break;
-        } else {
-            if (errno == EADDRINUSE) {
-                printf("Puerto en uso. Otro broker está activo. Reintentando...\n");
-            } else {
-                perror("Error inesperado al hacer bind");
-            }
-        }
-
-        close(socket_prueba);
-        intento++;
-        sleep(5);
+int is_broker_active() {
+    int socket_prueba = socket(AF_INET, SOCK_STREAM, 0);
+    if (socket_prueba < 0) {
+        perror("Error creando socket de prueba");
+        exit(EXIT_FAILURE);
     }
 
-    return 0;
+    struct sockaddr_in direccion;
+    direccion.sin_family = AF_INET;
+    direccion.sin_port = htons(8081); // Puerto de control del broker
+    direccion.sin_addr.s_addr = INADDR_ANY;
+
+    int result = bind(socket_prueba, (struct sockaddr *)&direccion, sizeof(direccion));
+    close(socket_prueba);
+
+    if (result == 0) {
+        // El puerto está disponible, no hay broker activo
+        return 0;
+    } else if (errno == EADDRINUSE) {
+        // El puerto está en uso, hay un broker activo
+        return 1;
+    } else {
+        perror("Error inesperado al verificar el puerto");
+        exit(EXIT_FAILURE);
+    }
 }
