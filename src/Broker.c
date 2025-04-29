@@ -99,6 +99,7 @@ void deleteConsumer(ConsumerGroupContainer *container, int consumer_id);
 // Funciones de manejo de mensajes
 void printQueue(Queue *queue);
 void printConsumers();
+void logMessageToFile(int consumer_id, Message *msg);
 void sendMessageConsumers(Message *msg);
 
 // Funciones de manejo de conexiones
