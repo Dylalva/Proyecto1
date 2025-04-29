@@ -5,7 +5,7 @@ SOURCE_FILE="Broker.c"
 EXECUTABLE="Broker"
 
 # Directorio del proyecto
-PROJECT_DIR="/home/david/Documents/GitHub/Proyecto1/src"
+PROJECT_DIR="/home/rodrigo/Proyecto1/src"
 
 # Cambiar al directorio del proyecto
 cd "$PROJECT_DIR" || { echo "Error: No se pudo acceder al directorio $PROJECT_DIR"; exit 1; }
