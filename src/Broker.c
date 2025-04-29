@@ -349,6 +349,23 @@ void printConsumers() {
     }
 }
 
+
+// Log de mensajes con consumers
+void logMessageToFile(int consumer_id, Message *msg) {
+    pthread_mutex_lock(&log_mutex);
+
+    FILE *log_file = fopen("consumer.log", "a"); // Abrir el archivo en modo append
+    if (log_file) {
+        fprintf(log_file, "Consumer ID: %d | Mensaje ID: %ld \n",
+                consumer_id, msg->offset);
+        fclose(log_file);
+    } else {
+        perror("Error al abrir el archivo consumer.log");
+    }
+
+    pthread_mutex_unlock(&log_mutex);
+}
+
 void sendMessageConsumers(Message *msg) {
     pthread_mutex_lock(&consumer_mutex);
 
@@ -378,6 +395,9 @@ void sendMessageConsumers(Message *msg) {
                 pthread_mutex_unlock(&consumerGroups->mutex);
                 continue;
             } else {
+                //Crear archivo log
+                logMessageToFile(consumer->id, msg);
+
                 printf("Mensaje enviado al Consumer ID: %d\n", consumer->id);
                 group->consumer_index = (group->consumer_index + 1) % group->count;
                 group->offset_group++;
