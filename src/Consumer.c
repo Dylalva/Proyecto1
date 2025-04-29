@@ -254,9 +254,20 @@ void enqueue(Queue *queue, void *data) {
 }
 
 void *dequeue(Queue *queue) {    
-    pthread_mutex_lock(&queue->mutex);    
-    while (queue->front == NULL && !global_ctx->shutdown_flag) {        
-        pthread_cond_wait(&queue->cond, &queue->mutex);    
+    pthread_mutex_lock(&queue->mutex);  
+    
+    // Atomicidad de la variable de cierre
+    pthread_mutex_lock(&global_ctx->shutdown_mutex);
+    int shutdown = global_ctx->shutdown_flag;
+    pthread_mutex_unlock(&global_ctx->shutdown_mutex);
+
+    while (queue->front == NULL && !shutdown) {        
+        pthread_cond_wait(&queue->cond, &queue->mutex);   
+
+        // Actualizar shutdown dentro del bucle
+        pthread_mutex_lock(&global_ctx->shutdown_mutex);
+        shutdown = global_ctx->shutdown_flag;
+        pthread_mutex_unlock(&global_ctx->shutdown_mutex);
     }    
     
     if (queue->front == NULL) {        
