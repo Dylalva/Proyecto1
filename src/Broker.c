@@ -68,10 +68,11 @@ Queue *cola;
 int mensaje_id = 0;
 int consumer_id = 0;
 pthread_mutex_t mensaje_id_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t consumer_id_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t cola_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t cola_cond = PTHREAD_COND_INITIALIZER;
 pthread_mutex_t consumer_mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER; // Mutex para proteger el archivo de log
+pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER; // Mutex para el log
 
 #define MAX_QUEUE_SIZE 1000 // Límite máximo de mensajes en la cola
 sem_t cola_sem; // Semáforo para controlar el tamaño de la cola
@@ -293,6 +294,7 @@ void deleteConsumer(ConsumerGroupContainer *container, int consumer_id) {
                 close(group->consumers[i]->socket_fd);
                 free(group->consumers[i]);
 
+                // Reorganizar el arreglo
                 for (int j = i; j < group->count - 1; j++) {
                     group->consumers[j] = group->consumers[j + 1];
                 }
@@ -391,9 +393,7 @@ void sendMessageConsumers(Message *msg) {
 
             if (bytes < 0) {
                 perror("Error al enviar el mensaje al consumer");
-                pthread_mutex_lock(&consumerGroups->mutex);
                 deleteConsumer(consumerGroups, consumer->id);
-                pthread_mutex_unlock(&consumerGroups->mutex);
                 continue;
             } else {
                 //Crear archivo log
@@ -506,7 +506,11 @@ void *handlerConnConsumer(void *arg) {
     free(arg);
 
     Consumer *consumer = malloc(sizeof(Consumer));
+
+    pthread_mutex_lock(&consumer_id_mutex);
     consumer->id = consumer_id++;
+    pthread_mutex_unlock(&consumer_id_mutex);
+    
     consumer->socket_fd = socket_cliente;
 
     pthread_mutex_lock(&consumer_mutex);
@@ -530,9 +534,13 @@ void *handlerConnConsumer(void *arg) {
     }
     pthread_cond_broadcast(&cola_cond);
     addConsumer(targetGroup, consumer);
-    pthread_mutex_unlock(&consumer_mutex);
 
-    // Notificar a los hilos de envío que hay un nuevo consumidor
+    // Notificar a los hilos de envío con el mutex correcto
+    pthread_mutex_lock(&cola_mutex);
+    pthread_cond_broadcast(&cola_cond);
+    pthread_mutex_unlock(&cola_mutex);
+ 
+    pthread_mutex_unlock(&consumer_mutex);
  
 
     printf("Nuevo Consumer conectado con ID: %d\n", consumer->id);
