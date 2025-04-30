@@ -370,7 +370,8 @@ void logMessageToFile(int consumer_id, Message *msg) {
 }
 
 void sendMessageConsumers(Message *msg) {
-    pthread_mutex_lock(&consumer_mutex);
+    // pthread_mutex_lock(&consumer_mutex);
+    pthread_mutex_lock(&consumerGroups->mutex);
 
     ConsumerGroupNode *currentNode = consumerGroups->head;
     while (currentNode) {
@@ -408,8 +409,8 @@ void sendMessageConsumers(Message *msg) {
         pthread_mutex_unlock(&group->group_mutex); // Desbloquear el mutex del grupo
         currentNode = next;
     }
-
-    pthread_mutex_unlock(&consumer_mutex);
+    pthread_mutex_unlock(&consumerGroups->mutex);
+    // pthread_mutex_unlock(&consumer_mutex);
 }
 
 // Funciones de manejo de conexiones
@@ -515,9 +516,11 @@ void *handlerConnConsumer(void *arg) {
 
     pthread_mutex_lock(&consumer_mutex);
 
+    pthread_mutex_lock(&consumerGroups->mutex);
     // Buscar un grupo con espacio disponible o crear uno nuevo
     ConsumerGroupNode *currentNode = consumerGroups->head;
     ConsumerGroup *targetGroup = NULL;
+    pthread_mutex_unlock(&consumerGroups->mutex);
 
     while (currentNode) {
         if (currentNode->group->count < currentNode->group->capacity) {
