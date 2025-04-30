@@ -492,7 +492,7 @@ void *handlerSendMessage(void *arg) {
 
         // Si hay consumidores, procesar el mensaje
         Message *msg = (Message *)dequeue(cola);
-
+        
         if (msg) {
             sendMessageConsumers(msg);
             free(msg);
@@ -532,7 +532,8 @@ void *handlerConnConsumer(void *arg) {
         targetGroup = initConsumerGroup();
         addConsumerGroup(consumerGroups, targetGroup);
     }
-    pthread_cond_broadcast(&cola_cond);
+
+    // Agregar consumidor al grupo
     addConsumer(targetGroup, consumer);
 
     // Notificar a los hilos de envío con el mutex correcto
