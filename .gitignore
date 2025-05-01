@@ -41,4 +41,5 @@ src/broker.pid
 src/run_broker.sh
 src/run_consumers.sh
 src/run_producers.sh
-src/broker.pid
+*.pid
+*.sh
