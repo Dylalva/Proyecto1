@@ -323,6 +323,10 @@ void *receiver_thread(void *arg) {
                     memcpy(msg_copy, &msg, sizeof(Message));
                     enqueue(ctx->cola, msg_copy);
                     printf("[Receptor] Mensaje recibido - Offset: %ld\n", msg.offset);
+
+                    // Enviar ACK al Broker
+                    const char *ack = "ACK";
+                    send(fds[0].fd, ack, strlen(ack), 0);
                 } else if (bytes == 0) {
                     printf("Conexión cerrada por el broker. Intentando reconexión...\n");
                     if (!reconnect_to_broker(ctx, &broker_addr)) {

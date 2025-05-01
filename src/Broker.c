@@ -60,6 +60,11 @@ typedef struct {
     pthread_mutex_t mutex;
 } ConsumerGroupContainer;
 
+typedef struct {
+    Consumer *consumer;
+    Message *msg;
+} ConsumerMessageArgs;
+
 // --------------------
 // Variables globales
 // --------------------
@@ -102,6 +107,7 @@ void printQueue(Queue *queue);
 void printConsumers();
 void logMessageToFile(int consumer_id, Message *msg);
 void sendMessageConsumers(Message *msg);
+void *resendMessageToConsumer(void *arg);
 
 // Funciones de manejo de conexiones
 void *handlerConnProducer(void *arg);
@@ -254,11 +260,13 @@ ConsumerGroup *initConsumerGroup() {
 }
 
 void addConsumer(ConsumerGroup *list, Consumer *consumer) {
+    pthread_mutex_lock(&list->group_mutex);
     if (list->count == list->capacity) {
         printf("El grupo ya tiene el máximo de consumidores (5).\n");
         return;
     }
     list->consumers[list->count++] = consumer;
+    pthread_mutex_unlock(&list->group_mutex);
 }
 
 ConsumerGroupContainer *initConsumerGroupContainer() {
@@ -269,19 +277,13 @@ ConsumerGroupContainer *initConsumerGroupContainer() {
 }
 
 void addConsumerGroup(ConsumerGroupContainer *container, ConsumerGroup *group) {
-    pthread_mutex_lock(&container->mutex);
-
     ConsumerGroupNode *newNode = malloc(sizeof(ConsumerGroupNode));
     newNode->group = group;
     newNode->next = container->head;
     container->head = newNode;
-
-    pthread_mutex_unlock(&container->mutex);
 }
 
 void deleteConsumer(ConsumerGroupContainer *container, int consumer_id) {
-    pthread_mutex_lock(&container->mutex);
-
     ConsumerGroupNode *prevNode = NULL;
     ConsumerGroupNode *currentNode = container->head;
 
@@ -300,6 +302,11 @@ void deleteConsumer(ConsumerGroupContainer *container, int consumer_id) {
                 }
                 group->count--;
 
+                // Ajustar el índice del consumidor
+                if (group->consumer_index >= group->count) {
+                    group->consumer_index = 0; // Reiniciar el índice si está fuera de rango
+                }
+
                 // Si el grupo queda vacío, eliminarlo
                 if (group->count == 0) {
                     free(group->consumers);
@@ -313,7 +320,6 @@ void deleteConsumer(ConsumerGroupContainer *container, int consumer_id) {
                     free(currentNode);
                 }
 
-                pthread_mutex_unlock(&container->mutex);
                 return;
             }
         }
@@ -321,8 +327,6 @@ void deleteConsumer(ConsumerGroupContainer *container, int consumer_id) {
         prevNode = currentNode;
         currentNode = currentNode->next;
     }
-
-    pthread_mutex_unlock(&container->mutex);
 }
 
 // Funciones de manejo de mensajes
@@ -370,47 +374,108 @@ void logMessageToFile(int consumer_id, Message *msg) {
 }
 
 void sendMessageConsumers(Message *msg) {
-    // pthread_mutex_lock(&consumer_mutex);
     pthread_mutex_lock(&consumerGroups->mutex);
 
     ConsumerGroupNode *currentNode = consumerGroups->head;
     while (currentNode) {
-        ConsumerGroupNode *next = currentNode->next;
         ConsumerGroup *group = currentNode->group;
 
-        pthread_mutex_lock(&group->group_mutex);  // Lock grupal
+        pthread_mutex_lock(&group->group_mutex);
 
         if (group->count > 0) {
-            // Seleccionar un consumidor aleatorio
-            if(group->consumer_index >= group->count) {
-                group->consumer_index = 0;
-            }
-            Consumer *consumer = group->consumers[group->consumer_index];
-            
-            // Se incrementa el valor del offset del grupo
+            // Seleccionar un consumidor disponible
+           int original_index = group->consumer_index;
             msg->offset = group->offset_group;
 
-            ssize_t bytes = send(consumer->socket_fd, msg, sizeof(Message), 0);
+            do {
+                Consumer *consumer = group->consumers[group->consumer_index];
 
-            if (bytes < 0) {
-                perror("Error al enviar el mensaje al consumer");
-                deleteConsumer(consumerGroups, consumer->id);
-                continue;
-            } else {
-                //Crear archivo log
-                logMessageToFile(consumer->id, msg);
+                // Intentar enviar el mensaje
+                ssize_t bytes = send(consumer->socket_fd, msg, sizeof(Message), 0);
 
-                printf("Mensaje enviado al Consumer ID: %d\n", consumer->id);
-                group->consumer_index = (group->consumer_index + 1) % group->count;
-                group->offset_group++;
-            }
+                if (bytes > 0) {
+                    // Mensaje enviado correctamente
+                    logMessageToFile(consumer->id, msg);
+                    printf("Mensaje enviado correctamente al Consumer ID: %d\n", consumer->id);
 
+                    // Incrementar el offset del grupo
+                    group->offset_group++;
+                    group->consumer_index = (group->consumer_index + 1) % group->count;
+                    break;
+                } else if (bytes == 0) {
+                    // Conexión cerrada, eliminar al consumidor
+                    perror("Conexión cerrada. Eliminando consumidor...");
+                    deleteConsumer(consumerGroups, consumer->id);
+
+                    // Ajustar el índice del consumidor
+                    if (group->consumer_index >= group->count) {
+                        group->consumer_index = 0;
+                    }
+                } else {
+                    // Error al enviar el mensaje, intentar reenviar en un hilo separado
+                    perror("Error al enviar el mensaje. Intentando reenviar...");
+                    pthread_t resend_thread;
+                    ConsumerMessageArgs *args = malloc(sizeof(ConsumerMessageArgs));
+                    args->consumer = consumer;
+                    args->msg = malloc(sizeof(Message));
+                    memcpy(args->msg, msg, sizeof(Message));
+
+                    if (pthread_create(&resend_thread, NULL, resendMessageToConsumer, args) != 0) {
+                        perror("Error al crear el hilo de reenvío");
+                        free(args->msg);
+                        free(args);
+                    } else {
+                        pthread_detach(resend_thread);
+                    }
+
+                
+                    group->consumer_index = (group->consumer_index + 1) % group->count;
+                }
+            } while (group->consumer_index != original_index);
         }
-        pthread_mutex_unlock(&group->group_mutex); // Desbloquear el mutex del grupo
-        currentNode = next;
+
+        pthread_mutex_unlock(&group->group_mutex);
+        currentNode = currentNode->next;
     }
+
     pthread_mutex_unlock(&consumerGroups->mutex);
-    // pthread_mutex_unlock(&consumer_mutex);
+}
+
+void *resendMessageToConsumer(void *arg) {
+    ConsumerMessageArgs *args = (ConsumerMessageArgs *)arg;
+    Consumer *consumer = args->consumer;
+    Message *msg = args->msg;
+
+    int retries = 3; // Número máximo de reintentos
+    while (retries > 0) {
+        ssize_t bytes = send(consumer->socket_fd, msg, sizeof(Message), 0);
+
+        if (bytes > 0) {
+            // Mensaje reenviado correctamente
+            printf("Mensaje reenviado correctamente al Consumer ID: %d\n", consumer->id);
+            logMessageToFile(consumer->id, msg);
+            free(msg);
+            free(args);
+            return NULL;
+        } else if (bytes == 0 || errno == EPIPE || errno == ECONNRESET) {
+            // Conexión cerrada
+            perror("Conexión cerrada durante el reenvío. Eliminando consumidor...");
+            pthread_mutex_lock(&consumerGroups->mutex);
+            deleteConsumer(consumerGroups, consumer->id);
+            pthread_mutex_unlock(&consumerGroups->mutex);
+            break;
+        } else {
+            // Otro error, intentar nuevamente
+            perror("Error al reenviar el mensaje. Reintentando...");
+            retries--;
+            sleep(1); // Esperar 1 segundo antes de reintentar
+        }
+    }
+
+    // Si no se pudo reenviar, liberar recursos
+    free(msg);
+    free(args);
+    return NULL;
 }
 
 // Funciones de manejo de conexiones
@@ -507,7 +572,7 @@ void *handlerConnConsumer(void *arg) {
     free(arg);
 
     Consumer *consumer = malloc(sizeof(Consumer));
-
+    pthread_mutex_lock(&consumerGroups->mutex);
     pthread_mutex_lock(&consumer_id_mutex);
     consumer->id = consumer_id++;
     pthread_mutex_unlock(&consumer_id_mutex);
@@ -516,11 +581,10 @@ void *handlerConnConsumer(void *arg) {
 
     pthread_mutex_lock(&consumer_mutex);
 
-    pthread_mutex_lock(&consumerGroups->mutex);
+    
     // Buscar un grupo con espacio disponible o crear uno nuevo
     ConsumerGroupNode *currentNode = consumerGroups->head;
     ConsumerGroup *targetGroup = NULL;
-    pthread_mutex_unlock(&consumerGroups->mutex);
 
     while (currentNode) {
         if (currentNode->group->count < currentNode->group->capacity) {
@@ -539,13 +603,14 @@ void *handlerConnConsumer(void *arg) {
     // Agregar consumidor al grupo
     addConsumer(targetGroup, consumer);
 
+
     // Notificar a los hilos de envío con el mutex correcto
     pthread_mutex_lock(&cola_mutex);
     pthread_cond_broadcast(&cola_cond);
     pthread_mutex_unlock(&cola_mutex);
  
     pthread_mutex_unlock(&consumer_mutex);
- 
+    pthread_mutex_unlock(&consumerGroups->mutex);
 
     printf("Nuevo Consumer conectado con ID: %d\n", consumer->id);
     pthread_exit(NULL);
