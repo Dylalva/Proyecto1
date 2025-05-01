@@ -51,7 +51,6 @@ int main() {
 
     // Intentar conectarse al broker con un mecanismo de reconexión
     time_t start_time = time(NULL); // Tiempo inicial
-    int seconds_to_wait = 0;
     while (1) {
         // Crear el socket TCP
         socket_fd = socket(AF_INET, SOCK_STREAM, 0);
