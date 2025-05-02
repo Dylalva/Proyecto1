@@ -54,10 +54,10 @@ Este proyecto es una implementación en C de un sistema distribuido de broker de
 ```
 PROYECTO1/
 ├── src/
-│ ├── Broker.c
-│ ├── Consumer.c
-│ ├── Producer.c
-├── MakeFile
+│ ├── broker.c
+│ ├── consumer.c
+│ ├── producer.c
+├── Makefile
 ├── README.md
 ```
 
@@ -106,15 +106,15 @@ Las características principales incluyen:
 Utiliza el siguiente comando para compilar el proyecto:
 
 ```bash
-gcc -o broker Broker.c -lpthread 
+gcc -o broker broker.c -lpthread 
 ```
 
 ```bash
-gcc -o consumer Consumer.c -lpthread 
+gcc -o consumer consumer.c -lpthread 
 ```
 
 ```bash
-gcc -o producer Producer.c -lpthread 
+gcc -o producer producer.c -lpthread 
 ```
 
 ### Ejecución
