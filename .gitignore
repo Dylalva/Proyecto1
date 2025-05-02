@@ -43,3 +43,7 @@ src/run_consumers.sh
 src/run_producers.sh
 *.pid
 *.sh
+broker
+.gitignore
+producer
+.gitignore
