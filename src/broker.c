@@ -77,7 +77,8 @@ pthread_mutex_t consumer_id_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t cola_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t cola_cond = PTHREAD_COND_INITIALIZER;
 pthread_mutex_t consumer_mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER; // Mutex para el log
+pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t create_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 #define MAX_QUEUE_SIZE 1000 // Límite máximo de mensajes en la cola
 sem_t cola_sem; // Semáforo para controlar el tamaño de la cola
@@ -420,6 +421,7 @@ void sendMessageConsumers(Message *msg) {
                     args->msg = malloc(sizeof(Message));
                     memcpy(args->msg, msg, sizeof(Message));
 
+                    pthread_mutex_lock(&create_mutex);
                     if (pthread_create(&resend_thread, NULL, resendMessageToConsumer, args) != 0) {
                         perror("Error al crear el hilo de reenvío");
                         free(args->msg);
@@ -427,6 +429,7 @@ void sendMessageConsumers(Message *msg) {
                     } else {
                         pthread_detach(resend_thread);
                     }
+                    pthread_mutex_unlock(&create_mutex);
 
                 
                     group->consumer_index = (group->consumer_index + 1) % group->count;
@@ -631,6 +634,7 @@ void *handlerThreadProducer(void *arg) {
         *socket_ptr = nueva_conexion;
 
         pthread_t hilo;
+        pthread_mutex_lock(&create_mutex);
         if (pthread_create(&hilo, NULL, handlerConnProducer, socket_ptr) != 0) {
             perror("No se pudo crear hilo para manejar conexión de Producer");
             close(nueva_conexion);
@@ -638,6 +642,7 @@ void *handlerThreadProducer(void *arg) {
         } else {
             pthread_detach(hilo);
         }
+        pthread_mutex_unlock(&create_mutex);
     }
 }
 
@@ -656,6 +661,7 @@ void *handlerThreadConsumer(void *arg) {
         *socket_ptr = nueva_conexion;
 
         pthread_t hilo;
+        pthread_mutex_lock(&create_mutex);
         if (pthread_create(&hilo, NULL, handlerConnConsumer, socket_ptr) != 0) {
             perror("No se pudo crear hilo para manejar conexión de Consumer");
             close(nueva_conexion);
@@ -663,6 +669,7 @@ void *handlerThreadConsumer(void *arg) {
         } else {
             pthread_detach(hilo);
         }
+        pthread_mutex_unlock(&create_mutex);
     }
 }
 
@@ -728,9 +735,11 @@ void init_broker() {
     printf("Broker ACTIVO escuchando en los puertos 8081 (Producers) y 8082 (Consumers)...\n");
 
     pthread_t hilo_producers, hilo_consumers, hilo_enviar;
+    pthread_mutex_lock(&create_mutex);
     pthread_create(&hilo_producers, NULL, handlerThreadProducer, &socket_producers);
     pthread_create(&hilo_consumers, NULL, handlerThreadConsumer, &socket_consumers);
     pthread_create(&hilo_enviar, NULL, handlerSendMessage, NULL);
+    pthread_mutex_unlock(&create_mutex);
 
     pthread_join(hilo_producers, NULL);
     pthread_join(hilo_consumers, NULL);
