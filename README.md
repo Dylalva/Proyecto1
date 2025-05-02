@@ -21,6 +21,7 @@ Este proyecto es una implementación en C de un sistema distribuido de broker de
 
 # Indice
 
+* [Estructura del proyecto](#Estructura-del-proyecto)
 * [Funciones Principales de un Message Broker](#Funciones-Principales-de-un-Message-Broker)
 * [Características del Sistema](#características-del-sistema)
 * [Descripción del sistema implementado](#Descripción-del-Sistema-Implementado)
@@ -31,6 +32,10 @@ Este proyecto es una implementación en C de un sistema distribuido de broker de
  
 * [Estrategia utilizada para evitar interbloqueos](Estrategia-Utilizada-para-Evitar-Interbloqueos)
 * [Limitaciones](#Limitaciones)
+* [Uso del Makefile](#Uso-del-Makefile)
+  * [Requisitos](#Requisitos)
+  * [Instrucciones](#Instrucciones)
+
 * [Fuentes y Referencias para el Proyecto](#fuentes-y-referencias-para-el-proyecto)
 
   * [Uso de Archivos](#manejo-de-archivos)
@@ -42,6 +47,19 @@ Este proyecto es una implementación en C de un sistema distribuido de broker de
   * [Manejo de Sockets en C](#Manejo-de-Sockets-en-C)
   * [Depuración y Manejo de Memoria](#Depuración-y-Manejo-de-Memoria)
   * [Algoritmo del Banquero](#Algoritmo-del-Banquero)
+
+---
+
+## Estructura del proyecto
+```
+PROYECTO1/
+├── src/
+│ ├── Broker.c
+│ ├── Consumer.c
+│ ├── Producer.c
+├── MakeFile
+├── README.md
+```
 
 ---
 
@@ -139,6 +157,46 @@ El sistema implementa varias estrategias para evitar interbloqueos:
 3. **Persistencia de Mensajes**: Aunque los mensajes se registran en un log, no hay un mecanismo de recuperación en caso de fallo del broker, lo que podría resultar en pérdida de datos.
 
 ---
+
+## Uso del Makefile
+
+### Requisitos
+
+1. **Sistema Operativo**: Linux.
+2. **Instalar GCC y Make**:
+
+   ```bash
+   sudo apt update
+   sudo apt install build-essential
+   ```
+
+### Instrucciones
+
+1. **Compilar el Proyecto**:
+   En la carpeta donde se encuentra el Makefile, ejecuta:
+
+   ```bash
+   make
+   ```
+
+   Esto generará los ejecutables:
+
+   * `broker`: El servidor principal.
+   * `producer`: El productor de mensajes.
+   * `consumer`: El consumidor de mensajes.
+
+2. **Limpiar Archivos Compilados**:
+
+   ```bash
+   make clean
+   ```
+
+   Esto eliminará los ejecutables generados.
+
+>**Nota** Este Makefile automatiza la compilación de los ejecutables y la limpieza de archivos generados.
+
+--- 
+
 
 ## Fuentes y Referencias para el Proyecto
 
