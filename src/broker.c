@@ -538,7 +538,7 @@ void *handlerSendMessage(void *arg) {
         pthread_mutex_unlock(&cola_mutex);
 
         // Verificar si hay consumidores disponibles
-        pthread_mutex_lock(&consumer_mutex);
+        pthread_mutex_lock(&consumerGroups->mutex);
         int consumers_available = 0;
         ConsumerGroupNode *currentNode = consumerGroups->head;
         while (currentNode) {
@@ -548,7 +548,7 @@ void *handlerSendMessage(void *arg) {
             }
             currentNode = currentNode->next;
         }
-        pthread_mutex_unlock(&consumer_mutex);
+        pthread_mutex_unlock(&consumerGroups->mutex);
 
         if (!consumers_available) {
             printf("No hay consumidores disponibles. Esperando...\n");
