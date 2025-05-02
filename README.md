@@ -39,6 +39,9 @@ Este proyecto es una implementación en C de un sistema distribuido de broker de
   * [Memoria Compartida](#memoria-compartida)
   * [Message Broker](#message-broker)
   * [DeadLock](#deadlock)
+  * [Manejo de Sockets en C](#Manejo-de-Sockets-en-C)
+  * [Depuración y Manejo de Memoria](#Depuración-y-Manejo-de-Memoria)
+  * [Algoritmo del Banquero](#Algoritmo-del-Banquero)
 
 ---
 
@@ -153,6 +156,7 @@ Esta sección recoge las fuentes consultadas para el desarrollo del proyecto, cl
 ### Hilos
 
 * [Uso de memoria compartida en CUDA C/C++ (Developer NVIDIA)](https://developer-nvidia-com.translate.goog/blog/using-shared-memory-cuda-cc/?_x_tr_sl=en&_x_tr_tl=es&_x_tr_hl=es&_x_tr_pto=tc)
+* * [Man7: Pthreads - Manual](https://man7.org/linux/man-pages/man7/pthreads.7.html)
 
 ### Memoria Compartida
 
@@ -169,3 +173,15 @@ Esta sección recoge las fuentes consultadas para el desarrollo del proyecto, cl
 * [Ejemplo de DeadLock en C (Gist)](https://gist.github.com/rouxcaesar/9b16d37789decddcab65dec6916264f2)
 * [Depuración de Deadlock con Pthreads en Linux (Medium)](https://medium.com/@dastuam/debugging-basic-pthreads-deadlock-under-linux-with-gdb-928126694266)
 * [Programa para crear Deadlock en C en Linux (Dextutor)](https://dextutor.com/program-to-create-deadlock-using-c-in-linux/)
+
+### Manejo de Sockets en C
+* [GeeksforGeeks: Socket Programming in C](https://www.geeksforgeeks.org/socket-programming-cc/)
+* [Dev.to: A Beginner’s Guide to Socket Programming in C](https://dev.to/sanjayrv/a-beginners-guide-to-socket-programming-in-c-5an5)
+
+### Depuración y Manejo de Memoria
+* [Valgrind: Quick Start](https://valgrind-org.translate.goog/docs/manual/quick-start.html?_x_tr_sl=en&_x_tr_tl=es&_x_tr_hl=es&_x_tr_pto=tc)
+
+### Algoritmo del Banquero
+
+* [GeeksforGeeks: Banker's Algorithm in Operating System](https://www-geeksforgeeks-org.translate.goog/bankers-algorithm-in-operating-system-2/?_x_tr_sl=en&_x_tr_tl=es&_x_tr_hl=es&_x_tr_pto=tc)
+* [Wikipedia: Algoritmo del Banquero](https://es.wikipedia.org/wiki/Algoritmo_del_banquero)
