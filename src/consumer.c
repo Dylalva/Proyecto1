@@ -27,8 +27,14 @@
 // -------------------------
 // Estructuras de Datos
 // -------------------------
+typedef enum { 
+    MSG_DATA = 0, 
+    MSG_ACK = 1 } 
+    MessageType;
+
 typedef struct {
-    long offset;
+    MessageType type;
+    uint32_t    offset;
     int id;
     char origen[50];
     char message[256];
@@ -287,18 +293,15 @@ void *dequeue(Queue *queue) {
     return data;
 }
 
-// Hilos de trabajo
 void *receiver_thread(void *arg) {
     ConsumerContext *ctx = (ConsumerContext *)arg;
     Message msg;
     struct pollfd fds[1];
     int timeout_ms = 1000;
-
-    struct sockaddr_in broker_addr = {
+    struct sockaddr_in broker_addr = { 
         .sin_family = AF_INET,
         .sin_port = htons(8082),
-        .sin_addr.s_addr = INADDR_ANY
-    };
+        .sin_addr.s_addr = INADDR_ANY };
 
     while (1) {
         pthread_mutex_lock(&ctx->shutdown_mutex);
@@ -307,44 +310,57 @@ void *receiver_thread(void *arg) {
             break;
         }
         pthread_mutex_unlock(&ctx->shutdown_mutex);
-
+        
         pthread_mutex_lock(&ctx->socket_mutex);
         fds[0].fd = ctx->socket_cliente;
         pthread_mutex_unlock(&ctx->socket_mutex);
-
         fds[0].events = POLLIN;
 
         int ret = poll(fds, 1, timeout_ms);
-        if (ret > 0) {
-            if (fds[0].revents & POLLIN) {
-                ssize_t bytes = recv(fds[0].fd, &msg, sizeof(Message), 0);
-                if (bytes > 0) {
-                    Message *msg_copy = malloc(sizeof(Message));
-                    memcpy(msg_copy, &msg, sizeof(Message));
-                    enqueue(ctx->cola, msg_copy);
-                    printf("[Receptor] Mensaje recibido - Offset: %ld\n", msg.offset);
+        if (ret > 0 && (fds[0].revents & POLLIN)) {
+            ssize_t bytes = recv(fds[0].fd, &msg, sizeof(Message), 0);
+            if (bytes == sizeof(Message) && msg.type == MSG_DATA) {
+                // procesar datos
+                Message *msg_copy = malloc(sizeof(Message));
+                memcpy(msg_copy, &msg, sizeof(Message));
+                enqueue(ctx->cola, msg_copy);
+                printf("[Receptor] Mensaje recibido - Offset: %u\n", msg.offset);
 
-                    // Enviar ACK al Broker
-                    const char *ack = "ACK";
-                    send(fds[0].fd, ack, strlen(ack), 0);
-                } else if (bytes == 0) {
-                    printf("Conexión cerrada por el broker. Intentando reconexión...\n");
-                    if (!reconnect_to_broker(ctx, &broker_addr)) {
+                // enviar ACK como Message
+                Message ack;
+                ack.type   = MSG_ACK;
+                ack.offset = msg.offset;
+                size_t to_send = sizeof(ack);
+                uint8_t *buf = (uint8_t*)&ack;
+                while (to_send > 0) {
+                    ssize_t sent = send(fds[0].fd, buf, to_send, MSG_NOSIGNAL);
+                    if (sent <= 0) {
+                        perror("Error enviando ACK");
                         break;
                     }
-                } else {
-                    perror("Error en recepción");
+                    buf     += sent;
+                    to_send -= sent;
                 }
             }
-        } else if (ret < 0) {
+            else if (bytes == 0) {
+                printf("Conexión cerrada por el broker. Intentando reconexión…\n");
+                if (!reconnect_to_broker(ctx, &broker_addr)) break;
+            }
+            else {
+                perror("Error en recepción");
+            }
+        }
+        else if (ret < 0) {
             perror("Error en poll()");
             break;
         }
     }
 
+    close(fds[0].fd);
     printf("Hilo receptor finalizado\n");
     return NULL;
 }
+
 
 void *processor_thread(void *arg) {
     ConsumerContext *ctx = (ConsumerContext *)arg;
@@ -360,7 +376,7 @@ void *processor_thread(void *arg) {
         Message *msg = dequeue(ctx->cola);
         if (!msg) continue;
 
-        printf("\n[Offset: %ld] Origen: %s\nMessage: %s\n", 
+        printf("\n[Offset: %u] Origen: %s\nMessage: %s\n", 
               msg->offset, msg->origen, msg->message);
             
         free(msg);

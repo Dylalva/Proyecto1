@@ -27,8 +27,14 @@ typedef struct Queue {
     int size;
 } Queue;
 
+typedef enum {
+    MSG_DATA = 0,  // paquete de datos
+    MSG_ACK  = 1   // confirmación (ACK)
+} MessageType;
+
 typedef struct {
-    long offset;
+    MessageType type;   // indica si es MSG_DATA o MSG_ACK
+    uint32_t    offset; 
     int id;
     char origen[50];
     char mensaje[256];
@@ -48,6 +54,7 @@ typedef struct {
     int consumer_index;
     pthread_t thread_group;
     pthread_mutex_t group_mutex; // Mutex para proteger el acceso al grupo
+    pthread_cond_t consumer_available;
 } ConsumerGroup;
 
 typedef struct ConsumerGroupNode {
@@ -257,16 +264,30 @@ ConsumerGroup *initConsumerGroup() {
     list->consumer_index = 0;
     list->consumers = malloc(sizeof(Consumer *) * list->capacity);
     pthread_mutex_init(&list->group_mutex, NULL);
+    pthread_cond_init(&list->consumer_available, NULL);
+
     return list;
 }
 
 void addConsumer(ConsumerGroup *list, Consumer *consumer) {
     pthread_mutex_lock(&list->group_mutex);
+    
+    // Verificar si el grupo está lleno
     if (list->count == list->capacity) {
         printf("El grupo ya tiene el máximo de consumidores (5).\n");
+        pthread_mutex_unlock(&list->group_mutex);
         return;
     }
+
+    // Agregar el nuevo consumidor
     list->consumers[list->count++] = consumer;
+    
+    // Si hay mensajes pendientes en la cola, notificar a todos los consumidores
+    if (list->count == 1) {
+        // Si es el primer consumidor, señalar que hay un consumidor disponible
+        pthread_cond_broadcast(&list->consumer_available);
+    }
+
     pthread_mutex_unlock(&list->group_mutex);
 }
 
@@ -285,50 +306,34 @@ void addConsumerGroup(ConsumerGroupContainer *container, ConsumerGroup *group) {
 }
 
 void deleteConsumer(ConsumerGroupContainer *container, int consumer_id) {
-    ConsumerGroupNode *prevNode = NULL;
-    ConsumerGroupNode *currentNode = container->head;
-
-    while (currentNode) {
-        ConsumerGroup *group = currentNode->group;
-
+    ConsumerGroupNode *node = container->head;
+    while (node) {
+        ConsumerGroup *group = node->group;
         for (int i = 0; i < group->count; i++) {
             if (group->consumers[i]->id == consumer_id) {
-                // Eliminar el consumidor
+                // Cerrar y liberar el consumidor
                 close(group->consumers[i]->socket_fd);
                 free(group->consumers[i]);
-
-                // Reorganizar el arreglo
-                for (int j = i; j < group->count - 1; j++) {
+                // Reorganizar el array
+                for (int j = i; j < group->count - 1; j++)
                     group->consumers[j] = group->consumers[j + 1];
-                }
                 group->count--;
 
-                // Ajustar el índice del consumidor
-                if (group->consumer_index >= group->count) {
-                    group->consumer_index = 0; // Reiniciar el índice si está fuera de rango
-                }
+                // Ajustar índice si hace falta
+                if (group->consumer_index >= group->count)
+                    group->consumer_index = 0;
 
-                // Si el grupo queda vacío, eliminarlo
-                if (group->count == 0) {
-                    free(group->consumers);
-                    free(group);
+                // Notificar a cualquier hilo esperando
+                pthread_cond_broadcast(&group->consumer_available);
 
-                    if (prevNode) {
-                        prevNode->next = currentNode->next;
-                    } else {
-                        container->head = currentNode->next;
-                    }
-                    free(currentNode);
-                }
-
+                // El grupo se mantiene creado por si algun mensaje queda pendiente
                 return;
             }
         }
-
-        prevNode = currentNode;
-        currentNode = currentNode->next;
+        node = node->next;
     }
 }
+
 
 // Funciones de manejo de mensajes
 void printQueue(Queue *queue) {
@@ -357,14 +362,13 @@ void printConsumers() {
     }
 }
 
-
 // Log de mensajes con consumers
 void logMessageToFile(int consumer_id, Message *msg) {
     pthread_mutex_lock(&log_mutex);
 
     FILE *log_file = fopen("consumer.log", "a"); // Abrir el archivo en modo append
     if (log_file) {
-        fprintf(log_file, "Consumer ID: %d | Mensaje ID: %ld \n",
+        fprintf(log_file, "Consumer ID: %d | Mensaje ID: %u \n",
                 consumer_id, msg->offset);
         fclose(log_file);
     } else {
@@ -374,111 +378,101 @@ void logMessageToFile(int consumer_id, Message *msg) {
     pthread_mutex_unlock(&log_mutex);
 }
 
-void sendMessageConsumers(Message *msg) {
-    pthread_mutex_lock(&consumerGroups->mutex);
+void sendMessageConsumers(Message *original_msg) {
+    // Copiar mensaje una sola vez
+    Message *msg = malloc(sizeof(Message));
+    memcpy(msg, original_msg, sizeof(Message));
+    msg->type = MSG_DATA;
 
-    ConsumerGroupNode *currentNode = consumerGroups->head;
-    while (currentNode) {
-        ConsumerGroup *group = currentNode->group;
+    int message_sent = 0;
 
+    while (!message_sent) {
+        // Acceder al único grupo o iterar si hay varios
+        pthread_mutex_lock(&consumerGroups->mutex);
+        ConsumerGroupNode *node = consumerGroups->head;
+        pthread_mutex_unlock(&consumerGroups->mutex);
+
+        // Asumimos un solo grupo; si hay varios, iterar aquí
+        ConsumerGroup *group = node->group;
+
+        // Esperar consumidores disponibles
         pthread_mutex_lock(&group->group_mutex);
+        while (group->count == 0) {
+            printf("Esperando a que se conecte un consumidor para offset %u...", msg->offset);
+            pthread_cond_wait(&group->consumer_available, &group->group_mutex);
+        }
+        
+        // Preparar offset actualizado
+        msg->offset = group->offset_group;
 
-        if (group->count > 0) {
-            // Seleccionar un consumidor disponible
-           int original_index = group->consumer_index;
-            msg->offset = group->offset_group;
+        // Intentos por consumidor
+        int attempts = 0;
+        int total = group->count;
+        int idx = group->consumer_index;
 
-            do {
-                Consumer *consumer = group->consumers[group->consumer_index];
+        // Intentar enviar hasta tener éxito
+        while (!message_sent && attempts < total) {
+            Consumer *consumer = group->consumers[idx];
+            int fd = consumer->socket_fd;
 
-                // Intentar enviar el mensaje
-                ssize_t bytes = send(consumer->socket_fd, msg, sizeof(Message), 0);
+            // Enviar mensaje completo
+            uint8_t *buf = (uint8_t*)msg;
+            size_t left = sizeof(Message);
+            ssize_t sent;
+            while (left > 0) {
+                sent = send(fd, buf, left, MSG_NOSIGNAL);
+                if (sent <= 0) break;
+                buf += sent;
+                left -= sent;
+            }
+            if (sent <= 0) {
+                // Consumidor desconectado o error, eliminar y probar siguiente
+                deleteConsumer(consumerGroups, consumer->id);
+                pthread_mutex_unlock(&group->group_mutex);
+                attempts++;
+                idx = (idx + 1) % (group->count > 0 ? group->count : 1);
+                pthread_mutex_lock(&group->group_mutex);
+                continue;
+            }
 
-                if (bytes > 0) {
-                    // Mensaje enviado correctamente
+            // Esperar ACK
+            fd_set rfds;
+            struct timeval tv = { .tv_sec = 5, .tv_usec = 0 };
+            FD_ZERO(&rfds);
+            FD_SET(fd, &rfds);
+            int r = select(fd+1, &rfds, NULL, NULL, &tv);
+            if (r > 0 && FD_ISSET(fd, &rfds)) {
+                Message ack;
+                if (recv(fd, &ack, sizeof(ack), MSG_WAITALL) == sizeof(ack)
+                    && ack.type == MSG_ACK && ack.offset == msg->offset) {
+                    // Envío confirmado
                     logMessageToFile(consumer->id, msg);
-                    printf("Mensaje enviado correctamente al Consumer ID: %d\n", consumer->id);
-
-                    // Incrementar el offset del grupo
                     group->offset_group++;
-                    group->consumer_index = (group->consumer_index + 1) % group->count;
-                    break;
-                } else if (bytes == 0) {
-                    // Conexión cerrada, eliminar al consumidor
-                    perror("Conexión cerrada. Eliminando consumidor...");
-                    deleteConsumer(consumerGroups, consumer->id);
-
-                    // Ajustar el índice del consumidor
-                    if (group->consumer_index >= group->count) {
-                        group->consumer_index = 0;
-                    }
+                    group->consumer_index = (idx + 1) % group->count;
+                    message_sent = 1;
                 } else {
-                    // Error al enviar el mensaje, intentar reenviar en un hilo separado
-                    perror("Error al enviar el mensaje. Intentando reenviar...");
-                    pthread_t resend_thread;
-                    ConsumerMessageArgs *args = malloc(sizeof(ConsumerMessageArgs));
-                    args->consumer = consumer;
-                    args->msg = malloc(sizeof(Message));
-                    memcpy(args->msg, msg, sizeof(Message));
-
-                    pthread_mutex_lock(&create_mutex);
-                    if (pthread_create(&resend_thread, NULL, resendMessageToConsumer, args) != 0) {
-                        perror("Error al crear el hilo de reenvío");
-                        free(args->msg);
-                        free(args);
-                    } else {
-                        pthread_detach(resend_thread);
-                    }
-                    pthread_mutex_unlock(&create_mutex);
-
-                
-                    group->consumer_index = (group->consumer_index + 1) % group->count;
+                    // ACK no válido: elimino consumidor y sigo
+                    deleteConsumer(consumerGroups, consumer->id);
+                    pthread_mutex_unlock(&group->group_mutex);
+                    attempts++;
+                    idx = (idx + 1) % (group->count > 0 ? group->count : 1);
+                    pthread_mutex_lock(&group->group_mutex);
                 }
-            } while (group->consumer_index != original_index);
+            } else {
+                // Timeout o error: elimino y sigo
+                if (r < 0) perror("select");
+                deleteConsumer(consumerGroups, consumer->id);
+                pthread_mutex_unlock(&group->group_mutex);
+                attempts++;
+                idx = (idx + 1) % (group->count > 0 ? group->count : 1);
+                pthread_mutex_lock(&group->group_mutex);
+            }
         }
 
         pthread_mutex_unlock(&group->group_mutex);
-        currentNode = currentNode->next;
     }
 
-    pthread_mutex_unlock(&consumerGroups->mutex);
-}
-
-void *resendMessageToConsumer(void *arg) {
-    ConsumerMessageArgs *args = (ConsumerMessageArgs *)arg;
-    Consumer *consumer = args->consumer;
-    Message *msg = args->msg;
-
-    int retries = 3; // Número máximo de reintentos
-    while (retries > 0) {
-        ssize_t bytes = send(consumer->socket_fd, msg, sizeof(Message), 0);
-
-        if (bytes > 0) {
-            // Mensaje reenviado correctamente
-            printf("Mensaje reenviado correctamente al Consumer ID: %d\n", consumer->id);
-            logMessageToFile(consumer->id, msg);
-            free(msg);
-            free(args);
-            return NULL;
-        } else if (bytes == 0 || errno == EPIPE || errno == ECONNRESET) {
-            // Conexión cerrada
-            perror("Conexión cerrada durante el reenvío. Eliminando consumidor...");
-            pthread_mutex_lock(&consumerGroups->mutex);
-            deleteConsumer(consumerGroups, consumer->id);
-            pthread_mutex_unlock(&consumerGroups->mutex);
-            break;
-        } else {
-            // Otro error, intentar nuevamente
-            perror("Error al reenviar el mensaje. Reintentando...");
-            retries--;
-            sleep(1); // Esperar 1 segundo antes de reintentar
-        }
-    }
-
-    // Si no se pudo reenviar, liberar recursos
     free(msg);
-    free(args);
-    return NULL;
 }
 
 // Funciones de manejo de conexiones
