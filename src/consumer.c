@@ -27,30 +27,27 @@
 // -------------------------
 // Estructuras de Datos
 // -------------------------
-typedef enum { 
-    MSG_DATA = 0, 
-    MSG_ACK = 1 } 
-    MessageType;
+typedef enum { MSG_DATA = 0, MSG_ACK = 1 } MessageType;
 
 typedef struct {
     MessageType type;
     uint32_t    offset;
-    int id;
-    char origen[50];
-    char message[256];
+    int         id;
+    char        origen[50];
+    char        message[256];
 } Message;
 
-typedef struct Node {    
-    void *data;    
-    struct Node *next;    
+typedef struct Node {
+    void *data;
+    struct Node *next;
 } Node;
 
-typedef struct Queue {    
-    Node *front;    
-    Node *rear;    
-    int size;    
+typedef struct Queue {
+    Node *front;
+    Node *rear;
+    int   size;
     pthread_mutex_t mutex;
-    pthread_cond_t cond;  
+    pthread_cond_t  cond;
 } Queue;
 
 typedef struct {
@@ -61,112 +58,82 @@ typedef struct {
     int shutdown_flag;
 } ConsumerContext;
 
-// -------------------------
 // Declaraciones de funciones
-// -------------------------
-
-// Funciones de utilidad
-void handle_error(const char *msg, int fatal);
 void set_nonblocking(int sockfd);
 void set_socket_timeout(int sockfd);
 int reconnect_to_broker(ConsumerContext *ctx, struct sockaddr_in *broker_addr);
 
-// Funciones de la cola
 Queue *initQueue();
 void freeQueue(Queue *queue);
 void enqueue(Queue *queue, void *data);
 void *dequeue(Queue *queue);
 
-// Hilos de trabajo
 void *receiver_thread(void *arg);
 void *processor_thread(void *arg);
 
-// Manejo de señales
 void shutdown_handler(int sig);
 void setup_signal_handlers();
 
-// -------------------------
-// Variable global
-// -------------------------
+
 static ConsumerContext *global_ctx = NULL;
 
-// -------------------------
-// Función principal
-// -------------------------
 int main(int argc, char *argv[]) {
-    ConsumerContext ctx = {
-        .shutdown_flag = 0
-    };
-    
+    ConsumerContext ctx;
+    ctx.shutdown_flag = 0;
     ctx.cola = initQueue();
     pthread_mutex_init(&ctx.shutdown_mutex, NULL);
     pthread_mutex_init(&ctx.socket_mutex, NULL);
 
-    // Configuración del socket
-    struct sockaddr_in broker_addr = {
-        .sin_family = AF_INET,
-        .sin_port = htons(8082),
-        .sin_addr.s_addr = INADDR_ANY
-    };
+    // Configura direcciones de brokers (primario y failover)
+    struct sockaddr_in brokers[2];
+    memset(&brokers, 0, sizeof(brokers));
+    // broker principal
+    brokers[0].sin_family = AF_INET;
+    brokers[0].sin_port = htons(8082);
+    inet_pton(AF_INET, "127.0.0.1", &brokers[0].sin_addr);
+    // failover
+    brokers[1].sin_family = AF_INET;
+    brokers[1].sin_port = htons(8083);
+    inet_pton(AF_INET, "127.0.0.1", &brokers[1].sin_addr);
 
-    time_t start_time = time(NULL);
-    while (1) {
+    int connected = 0;
+    for (int i = 0; i < 2; i++) {
         ctx.socket_cliente = socket(AF_INET, SOCK_STREAM, 0);
-        if (ctx.socket_cliente < 0) {
-            perror("Error al crear el socket");
-            sleep(1);
-            continue;
+        if (ctx.socket_cliente < 0) continue;
+        if (connect(ctx.socket_cliente, (struct sockaddr*)&brokers[i], sizeof(brokers[i])) == 0) {
+            printf("Se ha conectado al broker %d\n", i);
+            connected = 1;
+            break;
         }
-
-        if (connect(ctx.socket_cliente, (struct sockaddr*)&broker_addr, sizeof(broker_addr)) == 0) {
-            printf("Conexión inicial establecida con el broker.\n");
-            printf("Consumer conectado exitosamente al broker en el puerto 8082.\n");
-            break; // Salir del bucle si la conexión es exitosa
-        }
-
-        perror("Error al conectar con el broker. Reintentando...");
         close(ctx.socket_cliente);
-
-        if (time(NULL) - start_time >= RECONNECT_TIMEOUT) {
-            fprintf(stderr, "No se pudo conectar con el broker después de %d segundos. Terminando el proceso.\n", RECONNECT_TIMEOUT);
-            exit(EXIT_FAILURE);
-        }
-
-        sleep(1); // Esperar 1 segundo antes de reintentar
+    }
+    if (!connected) {
+        fprintf(stderr, "No hay brokers disponibles. Saliendo.\n");
+        exit(EXIT_FAILURE);
     }
 
     set_nonblocking(ctx.socket_cliente);
     set_socket_timeout(ctx.socket_cliente);
 
-    // Configurar señales
     global_ctx = &ctx;
     setup_signal_handlers();
 
-    // Iniciar hilos
-    pthread_t threads[2];
-    pthread_create(&threads[0], NULL, receiver_thread, &ctx);
-    pthread_create(&threads[1], NULL, processor_thread, &ctx);
+    pthread_t th_recv, th_proc;
+    pthread_create(&th_recv, NULL, receiver_thread, &ctx);
+    pthread_create(&th_proc, NULL, processor_thread, &ctx);
 
-    // Esperar finalización
-    pthread_join(threads[0], NULL);
-    pthread_join(threads[1], NULL);
+    pthread_join(th_recv, NULL);
+    pthread_join(th_proc, NULL);
 
-    // Limpieza final
-    printf("Realizando limpieza final...\n");
+    printf("Limpieza final...\n");
     freeQueue(ctx.cola);
     close(ctx.socket_cliente);
     pthread_mutex_destroy(&ctx.shutdown_mutex);
     pthread_mutex_destroy(&ctx.socket_mutex);
-
     printf("Consumer detenido correctamente\n");
-    return EXIT_SUCCESS;
+    return 0;
 }
 
-// -------------------------
-// Definiciones de funciones
-// -------------------------
-
-// Funciones de utilidad
 void handle_error(const char *msg, int fatal) {
     perror(msg);
     if (fatal) exit(EXIT_FAILURE);
@@ -174,9 +141,7 @@ void handle_error(const char *msg, int fatal) {
 
 void set_nonblocking(int sockfd) {
     int flags = fcntl(sockfd, F_GETFL, 0);
-    if (fcntl(sockfd, F_SETFL, flags | O_NONBLOCK) == -1) {
-        handle_error("Error setting non-blocking", 1);
-    }
+    fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
 }
 
 void set_socket_timeout(int sockfd) {
@@ -185,132 +150,98 @@ void set_socket_timeout(int sockfd) {
 }
 
 int reconnect_to_broker(ConsumerContext *ctx, struct sockaddr_in *broker_addr) {
-    time_t start_time = time(NULL);
-    while (time(NULL) - start_time < RECONNECT_TIMEOUT) {
-        printf("Intentando reconectar con el broker...\n");
-
-        int new_socket = socket(AF_INET, SOCK_STREAM, 0);
-        if (new_socket < 0) {
-            perror("Error al crear el socket");
-            sleep(1);
-            continue;
-        }
-
-        if (connect(new_socket, (struct sockaddr *)broker_addr, sizeof(*broker_addr)) == 0) {
-            printf("Reconexión exitosa con el broker.\n");
-
+    time_t start = time(NULL);
+    while (time(NULL) - start < RECONNECT_TIMEOUT) {
+        printf("Reintentando conexion...\n");
+        int s = socket(AF_INET, SOCK_STREAM, 0);
+        if (s < 0) { sleep(1); continue; }
+        if (connect(s, (struct sockaddr*)broker_addr, sizeof(*broker_addr)) == 0) {
             pthread_mutex_lock(&ctx->socket_mutex);
-            if (ctx->socket_cliente != -1) {
-                close(ctx->socket_cliente);
-            }
-            ctx->socket_cliente = new_socket;
+            close(ctx->socket_cliente);
+            ctx->socket_cliente = s;
             pthread_mutex_unlock(&ctx->socket_mutex);
-
-            set_nonblocking(ctx->socket_cliente);
-            set_socket_timeout(ctx->socket_cliente);
-            return 1; // Reconexión exitosa
+            set_nonblocking(s);
+            set_socket_timeout(s);
+            return 1;
         }
-
-        perror("Error al reconectar con el broker");
-        close(new_socket);
+        close(s);
         sleep(1);
     }
-
-    printf("No se pudo reconectar con el broker después de %d segundos.\n", RECONNECT_TIMEOUT);
-    return 0; // Reconexión fallida
+    // no reconecto: disparar shutdown
+    pthread_mutex_lock(&ctx->shutdown_mutex);
+    ctx->shutdown_flag = 1;
+    pthread_mutex_unlock(&ctx->shutdown_mutex);
+    pthread_mutex_lock(&ctx->cola->mutex);
+    pthread_cond_broadcast(&ctx->cola->cond);
+    pthread_mutex_unlock(&ctx->cola->mutex);
+    return 0;
 }
 
-// Funciones de la cola
-Queue *initQueue() {    
-    Queue *queue = malloc(sizeof(Queue));    
-    queue->front = NULL;    
-    queue->rear = NULL;    
-    queue->size = 0;    
-    pthread_mutex_init(&queue->mutex, NULL);
-    pthread_cond_init(&queue->cond, NULL);    
-    return queue;
+Queue *initQueue() {
+    Queue *q = malloc(sizeof(Queue));
+    q->front = q->rear = NULL;
+    q->size = 0;
+    pthread_mutex_init(&q->mutex, NULL);
+    pthread_cond_init(&q->cond, NULL);
+    return q;
 }
 
-void freeQueue(Queue *queue) {    
-    Node *current = queue->front;    
-    while (current) {        
-        Node *next = current->next;        
-        free(current->data);        
-        free(current);        
-        current = next;    
-    }    
-    free(queue);    
+void freeQueue(Queue *q) {
+    Node *cur = q->front;
+    while (cur) {
+        Node *nx = cur->next;
+        free(cur->data);
+        free(cur);
+        cur = nx;
+    }
+    free(q);
 }
 
-void enqueue(Queue *queue, void *data) {    
-    pthread_mutex_lock(&queue->mutex);    
-    Node *newNode = malloc(sizeof(Node));    
-    newNode->data = data;    
-    newNode->next = NULL;    
-    
-    if (queue->rear == NULL) {        
-        queue->front = newNode;       
-    } else {        
-        queue->rear->next = newNode;        
-    }    
-    queue->rear = newNode;    
-    queue->size++;
-    pthread_cond_signal(&queue->cond);
-    pthread_mutex_unlock(&queue->mutex);
+void enqueue(Queue *q, void *data) {
+    pthread_mutex_lock(&q->mutex);
+    Node *n = malloc(sizeof(Node));
+    n->data = data; n->next = NULL;
+    if (!q->rear) q->front = n;
+    else q->rear->next = n;
+    q->rear = n;
+    q->size++;
+    pthread_cond_signal(&q->cond);
+    pthread_mutex_unlock(&q->mutex);
 }
 
-void *dequeue(Queue *queue) {    
-    pthread_mutex_lock(&queue->mutex);  
-    
-    // Atomicidad de la variable de cierre
+void *dequeue(Queue *q) {
+    pthread_mutex_lock(&q->mutex);
     pthread_mutex_lock(&global_ctx->shutdown_mutex);
-    int shutdown = global_ctx->shutdown_flag;
+    int sd = global_ctx->shutdown_flag;
     pthread_mutex_unlock(&global_ctx->shutdown_mutex);
-
-    while (queue->front == NULL && !shutdown) {        
-        pthread_cond_wait(&queue->cond, &queue->mutex);   
-
-        // Actualizar shutdown dentro del bucle
+    while (!q->front && !sd) {
+        pthread_cond_wait(&q->cond, &q->mutex);
         pthread_mutex_lock(&global_ctx->shutdown_mutex);
-        shutdown = global_ctx->shutdown_flag;
+        sd = global_ctx->shutdown_flag;
         pthread_mutex_unlock(&global_ctx->shutdown_mutex);
-    }    
-    
-    if (queue->front == NULL) {        
-        pthread_mutex_unlock(&queue->mutex);    
-        return NULL;    
-    }    
-    
-    Node *temp = queue->front;     
-    void *data = temp->data;    
-    queue->front = queue->front->next;    
-    if (queue->front == NULL) {        
-        queue->rear = NULL;    
-    }    
-    free(temp);    
-    queue->size--;    
-    pthread_mutex_unlock(&queue->mutex);    
-    return data;
+    }
+    if (!q->front) { pthread_mutex_unlock(&q->mutex); return NULL; }
+    Node *n = q->front;
+    void *d = n->data;
+    q->front = n->next;
+    if (!q->front) q->rear = NULL;
+    free(n);
+    q->size--;
+    pthread_mutex_unlock(&q->mutex);
+    return d;
 }
 
 void *receiver_thread(void *arg) {
-    ConsumerContext *ctx = (ConsumerContext *)arg;
-    Message msg;
+    ConsumerContext *ctx = arg;
     struct pollfd fds[1];
     int timeout_ms = 1000;
-    struct sockaddr_in broker_addr = { 
-        .sin_family = AF_INET,
-        .sin_port = htons(8082),
-        .sin_addr.s_addr = INADDR_ANY };
-
+    struct sockaddr_in broker_addr = { .sin_family = AF_INET, .sin_port = htons(8082), .sin_addr.s_addr = INADDR_ANY };
+    Message msg;
     while (1) {
         pthread_mutex_lock(&ctx->shutdown_mutex);
-        if (ctx->shutdown_flag) {
-            pthread_mutex_unlock(&ctx->shutdown_mutex);
-            break;
-        }
+        if (ctx->shutdown_flag) { pthread_mutex_unlock(&ctx->shutdown_mutex); break; }
         pthread_mutex_unlock(&ctx->shutdown_mutex);
-        
+
         pthread_mutex_lock(&ctx->socket_mutex);
         fds[0].fd = ctx->socket_cliente;
         pthread_mutex_unlock(&ctx->socket_mutex);
@@ -318,83 +249,57 @@ void *receiver_thread(void *arg) {
 
         int ret = poll(fds, 1, timeout_ms);
         if (ret > 0 && (fds[0].revents & POLLIN)) {
-            ssize_t bytes = recv(fds[0].fd, &msg, sizeof(Message), 0);
-            if (bytes == sizeof(Message) && msg.type == MSG_DATA) {
-                // procesar datos
-                Message *msg_copy = malloc(sizeof(Message));
-                memcpy(msg_copy, &msg, sizeof(Message));
-                enqueue(ctx->cola, msg_copy);
-                printf("[Receptor] Mensaje recibido - Offset: %u\n", msg.offset);
-
-                // enviar ACK como Message
-                Message ack;
-                ack.type   = MSG_ACK;
-                ack.offset = msg.offset;
-                size_t to_send = sizeof(ack);
-                uint8_t *buf = (uint8_t*)&ack;
-                while (to_send > 0) {
-                    ssize_t sent = send(fds[0].fd, buf, to_send, MSG_NOSIGNAL);
-                    if (sent <= 0) {
-                        perror("Error enviando ACK");
-                        break;
-                    }
-                    buf     += sent;
-                    to_send -= sent;
+            ssize_t bytes = recv(fds[0].fd, &msg, sizeof(msg), 0);
+            if (bytes == sizeof(msg) && msg.type == MSG_DATA) {
+                Message *c = malloc(sizeof(msg));
+                *c = msg;
+                enqueue(ctx->cola, c);
+                printf("\n[Receptor] Mensaje recibido - Offset: %u\n", msg.offset);
+                Message ack = { .type=MSG_ACK, .offset=msg.offset };
+                uint8_t *b = (uint8_t *)&ack;
+                size_t left = sizeof(ack);
+                while (left>0) { 
+                    ssize_t s = send(fds[0].fd, b, left, MSG_NOSIGNAL); 
+                    if (s<=0) break; b+=s; left-=s; 
                 }
-            }
-            else if (bytes == 0) {
-                printf("Conexión cerrada por el broker. Intentando reconexión…\n");
-                if (!reconnect_to_broker(ctx, &broker_addr)) break;
-            }
-            else {
-                perror("Error en recepción");
-            }
-        }
-        else if (ret < 0) {
-            perror("Error en poll()");
-            break;
-        }
-    }
-
-    close(fds[0].fd);
-    printf("Hilo receptor finalizado\n");
-    return NULL;
-}
-
-
-void *processor_thread(void *arg) {
-    ConsumerContext *ctx = (ConsumerContext *)arg;
-    
-    while (1) {
-        pthread_mutex_lock(&ctx->shutdown_mutex);
-        if (ctx->shutdown_flag) {
+            } else if (bytes==0) {
+                printf("Broker desconectado. Intentando reconexion...\n");
+                if (!reconnect_to_broker(ctx,&broker_addr)) break;
+            } else perror("recv");
+        } else if (ret<0) {
+            perror("poll");
+            pthread_mutex_lock(&ctx->shutdown_mutex);
+            ctx->shutdown_flag=1;
             pthread_mutex_unlock(&ctx->shutdown_mutex);
             break;
         }
-        pthread_mutex_unlock(&ctx->shutdown_mutex);
-        
-        Message *msg = dequeue(ctx->cola);
-        if (!msg) continue;
-
-        printf("\n[Offset: %u] Origen: %s\nMessage: %s\n", 
-              msg->offset, msg->origen, msg->message);
-            
-        free(msg);
     }
-    printf("Hilo procesador finalizado\n");
+    printf("Hilo receptor terminado\n");
     return NULL;
 }
 
-// Manejo de señales
+void *processor_thread(void *arg) {
+    ConsumerContext *ctx = arg;
+    while (1) {
+        pthread_mutex_lock(&ctx->shutdown_mutex);
+        if (ctx->shutdown_flag) { pthread_mutex_unlock(&ctx->shutdown_mutex); break; }
+        pthread_mutex_unlock(&ctx->shutdown_mutex);
+        Message *m = dequeue(ctx->cola);
+        if (!m) continue;
+        printf("[Offset: %u] Origen: %s\nMessage: %s\n", 
+            m->offset, m->origen, m->message);
+        free(m);
+    }
+    printf("Hilo procesador terminado\n");
+    return NULL;
+}
+
 void shutdown_handler(int sig) {
-    printf("\nRecibida señal %d. Iniciando cierre seguro...\n", sig);
-    
+    printf("Senal %d recibida, cerrando...\n", sig);
     if (global_ctx) {
         pthread_mutex_lock(&global_ctx->shutdown_mutex);
         global_ctx->shutdown_flag = 1;
         pthread_mutex_unlock(&global_ctx->shutdown_mutex);
-        
-        // Despertar todos los hilos bloqueados
         pthread_mutex_lock(&global_ctx->cola->mutex);
         pthread_cond_broadcast(&global_ctx->cola->cond);
         pthread_mutex_unlock(&global_ctx->cola->mutex);
@@ -406,7 +311,6 @@ void setup_signal_handlers() {
     sa.sa_handler = shutdown_handler;
     sa.sa_flags = 0;
     sigemptyset(&sa.sa_mask);
-    
-    sigaction(SIGINT, &sa, NULL);   // Ctrl+C
-    sigaction(SIGTERM, &sa, NULL);  // kill
+    sigaction(SIGINT,&sa,NULL);
+    sigaction(SIGTERM,&sa,NULL);
 }
