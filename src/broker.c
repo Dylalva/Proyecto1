@@ -379,100 +379,191 @@ void logMessageToFile(int consumer_id, Message *msg) {
 }
 
 void sendMessageConsumers(Message *original_msg) {
-    // Copiar mensaje una sola vez
-    Message *msg = malloc(sizeof(Message));
-    memcpy(msg, original_msg, sizeof(Message));
-    msg->type = MSG_DATA;
+    // Recorrer todos los grupos
+    pthread_mutex_lock(&consumerGroups->mutex);
+    ConsumerGroupNode *currentNode = consumerGroups->head;
+    pthread_mutex_unlock(&consumerGroups->mutex);
 
-    int message_sent = 0;
+    while (currentNode) {
+        ConsumerGroup *group = currentNode->group;
+        int message_sent = 0;
 
-    while (!message_sent) {
-        // Acceder al único grupo o iterar si hay varios
-        pthread_mutex_lock(&consumerGroups->mutex);
-        ConsumerGroupNode *node = consumerGroups->head;
-        pthread_mutex_unlock(&consumerGroups->mutex);
+        // Copiar mensaje por grupo
+        Message *msg = malloc(sizeof(Message));
+        memcpy(msg, original_msg, sizeof(Message));
+        msg->type = MSG_DATA;
 
-        // Asumimos un solo grupo; si hay varios, iterar aquí
-        ConsumerGroup *group = node->group;
-
-        // Esperar consumidores disponibles
         pthread_mutex_lock(&group->group_mutex);
         while (group->count == 0) {
-            printf("Esperando a que se conecte un consumidor para offset %u...", msg->offset);
+            printf("Esperando consumidor en grupo para offset %u...\n", msg->offset);
             pthread_cond_wait(&group->consumer_available, &group->group_mutex);
         }
-        
-        // Preparar offset actualizado
-        msg->offset = group->offset_group;
+        pthread_mutex_unlock(&group->group_mutex);
 
-        // Intentos por consumidor
-        int attempts = 0;
-        int total = group->count;
-        int idx = group->consumer_index;
+        while (!message_sent) {
+            pthread_mutex_lock(&group->group_mutex);
 
-        // Intentar enviar hasta tener éxito
-        while (!message_sent && attempts < total) {
-            Consumer *consumer = group->consumers[idx];
-            int fd = consumer->socket_fd;
+            // Actualizar offset del mensaje para este grupo
+            msg->offset = group->offset_group;
 
-            // Enviar mensaje completo
-            uint8_t *buf = (uint8_t*)msg;
-            size_t left = sizeof(Message);
-            ssize_t sent;
-            while (left > 0) {
-                sent = send(fd, buf, left, MSG_NOSIGNAL);
-                if (sent <= 0) break;
-                buf += sent;
-                left -= sent;
-            }
-            if (sent <= 0) {
-                // Consumidor desconectado o error, eliminar y probar siguiente
-                deleteConsumer(consumerGroups, consumer->id);
-                pthread_mutex_unlock(&group->group_mutex);
-                attempts++;
-                idx = (idx + 1) % (group->count > 0 ? group->count : 1);
-                pthread_mutex_lock(&group->group_mutex);
-                continue;
-            }
+            int attempts = 0;
+            int total = group->count;
+            int idx = group->consumer_index;
 
-            // Esperar ACK
-            fd_set rfds;
-            struct timeval tv = { .tv_sec = 5, .tv_usec = 0 };
-            FD_ZERO(&rfds);
-            FD_SET(fd, &rfds);
-            int r = select(fd+1, &rfds, NULL, NULL, &tv);
-            if (r > 0 && FD_ISSET(fd, &rfds)) {
-                Message ack;
-                if (recv(fd, &ack, sizeof(ack), MSG_WAITALL) == sizeof(ack)
-                    && ack.type == MSG_ACK && ack.offset == msg->offset) {
-                    // Envío confirmado
-                    logMessageToFile(consumer->id, msg);
-                    group->offset_group++;
-                    group->consumer_index = (idx + 1) % group->count;
-                    message_sent = 1;
+            while (!message_sent && attempts < total) {
+                if (group->count == 0) break;  // Evita división por 0
+                Consumer *consumer = group->consumers[idx];
+                int fd = consumer->socket_fd;
+
+                // Enviar mensaje
+                uint8_t *buf = (uint8_t*)msg;
+                size_t left = sizeof(Message);
+                ssize_t sent;
+                while (left > 0) {
+                    sent = send(fd, buf, left, MSG_NOSIGNAL);
+                    if (sent <= 0) break;
+                    buf += sent;
+                    left -= sent;
+                }
+
+                if (sent <= 0) {
+                    deleteConsumer(consumerGroups, consumer->id);
+                    pthread_mutex_unlock(&group->group_mutex);
+                    attempts++;
+                    idx = (idx + 1) % (group->count > 0 ? group->count : 1);
+                    pthread_mutex_lock(&group->group_mutex);
+                    continue;
+                }
+
+                // Esperar ACK
+                fd_set rfds;
+                struct timeval tv = { .tv_sec = 5, .tv_usec = 0 };
+                FD_ZERO(&rfds);
+                FD_SET(fd, &rfds);
+                int r = select(fd+1, &rfds, NULL, NULL, &tv);
+
+                if (r > 0 && FD_ISSET(fd, &rfds)) {
+                    Message ack;
+                    if (recv(fd, &ack, sizeof(ack), MSG_WAITALL) == sizeof(ack)
+                        && ack.type == MSG_ACK && ack.offset == msg->offset) {
+                        // OK
+                        logMessageToFile(consumer->id, msg);
+                        group->offset_group++;
+                        group->consumer_index = (idx + 1) % group->count;
+                        message_sent = 1;
+                    } else {
+                        deleteConsumer(consumerGroups, consumer->id);
+                        pthread_mutex_unlock(&group->group_mutex);
+                        attempts++;
+                        idx = (idx + 1) % (group->count > 0 ? group->count : 1);
+                        pthread_mutex_lock(&group->group_mutex);
+                    }
                 } else {
-                    // ACK no válido: elimino consumidor y sigo
+                    if (r < 0) perror("select");
                     deleteConsumer(consumerGroups, consumer->id);
                     pthread_mutex_unlock(&group->group_mutex);
                     attempts++;
                     idx = (idx + 1) % (group->count > 0 ? group->count : 1);
                     pthread_mutex_lock(&group->group_mutex);
                 }
-            } else {
-                // Timeout o error: elimino y sigo
-                if (r < 0) perror("select");
-                deleteConsumer(consumerGroups, consumer->id);
-                pthread_mutex_unlock(&group->group_mutex);
-                attempts++;
-                idx = (idx + 1) % (group->count > 0 ? group->count : 1);
-                pthread_mutex_lock(&group->group_mutex);
             }
+
+            pthread_mutex_unlock(&group->group_mutex);
         }
 
-        pthread_mutex_unlock(&group->group_mutex);
+        free(msg);
+        currentNode = currentNode->next;
+    }
+}
+
+
+// Funciones de manejo de conexiones
+void *handlerConnProducer(void *arg) {
+    int socket_cliente = *(int *)arg;
+    free(arg);
+
+    Message msg;
+    ssize_t bytes_recibidos = recv(socket_cliente, &msg, sizeof(Message), 0);
+
+    if (bytes_recibidos > 0) {
+        pthread_mutex_lock(&mensaje_id_mutex);
+        msg.id = mensaje_id++;
+        pthread_mutex_unlock(&mensaje_id_mutex);
+
+        // Registrar el mensaje en el archivo mensajes.log
+        pthread_mutex_lock(&log_mutex); // Bloquear el mutex antes de escribir en el archivo
+        FILE *log_file = fopen("mensajes.log", "a");
+        if (log_file) {
+            fprintf(log_file, "ID: %d | Origen: %s | Contenido: %s\n", msg.id, msg.origen, msg.mensaje);
+            fclose(log_file);
+        } else {
+            perror("Error al abrir el archivo mensajes.log");
+        }
+        pthread_mutex_unlock(&log_mutex); // Liberar el mutex después de escribir en el archivo
+
+        Message *msg_ptr = malloc(sizeof(Message));
+        if (msg_ptr) {
+            memcpy(msg_ptr, &msg, sizeof(Message));
+            enqueue(cola, msg_ptr);
+
+            printf("\nMensaje recibido de Producer:\n");
+            printf("  ID: %d\n  Origen: %s\n  Contenido: %s\n", msg.id, msg.origen, msg.mensaje);
+            
+            pthread_mutex_lock(&cola_mutex);
+            pthread_cond_signal(&cola_cond); // Avisar al hilo que envía mensajes que hay un nuevo mensaje
+            pthread_mutex_unlock(&cola_mutex);
+            printQueue(cola); // Solo para pruebas
+        } else {
+            perror("No se pudo asignar memoria para el mensaje");
+        }
+    } else {
+        perror("Error al recibir mensaje o conexión cerrada");
     }
 
-    free(msg);
+    close(socket_cliente);
+    pthread_exit(NULL);
+}
+
+void *handlerSendMessage(void *arg) {
+    while (1) {
+        pthread_mutex_lock(&cola_mutex);
+
+        // Esperar a que haya mensajes en la cola
+        while (isEmpty(cola)) {
+            printf("Esperando mensajes en la cola...\n");
+            pthread_cond_wait(&cola_cond, &cola_mutex);
+        }
+
+        pthread_mutex_unlock(&cola_mutex);
+
+        // Verificar si hay consumidores disponibles
+        pthread_mutex_lock(&consumerGroups->mutex);
+        int consumers_available = 0;
+        ConsumerGroupNode *currentNode = consumerGroups->head;
+        while (currentNode) {
+            if (currentNode->group->count > 0) {
+                consumers_available = 1;
+                break;
+            }
+            currentNode = currentNode->next;
+        }
+        pthread_mutex_unlock(&consumerGroups->mutex);
+
+        if (!consumers_available) {
+            printf("No hay consumidores disponibles. Esperando...\n");
+            sleep(1); 
+            continue;
+        }
+
+        // Si hay consumidores, procesar el mensaje
+        Message *msg = (Message *)dequeue(cola);
+        
+        if (msg) {
+            sendMessageConsumers(msg);
+            free(msg);
+        }
+    }
+    return NULL;
 }
 
 // Funciones de manejo de conexiones
