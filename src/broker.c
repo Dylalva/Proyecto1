@@ -418,7 +418,7 @@ void sendMessageConsumers(Message *original_msg) {
                 int fd = consumer->socket_fd;
 
                 // Enviar mensaje
-                uint8_t *buf = (uint8_t*)msg;
+                uint8_t buf = (uint8_t)msg;
                 size_t left = sizeof(Message);
                 ssize_t sent;
                 while (left > 0) {
