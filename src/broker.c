@@ -160,8 +160,6 @@ int main() {
                     printf("Broker iniciado con PID: %d\n", broker_pid);
                 }
             }
-        } else {
-            printf("Broker ya está activo. Verificando nuevamente en 5 segundos...\n");
         }
 
         // Esperar 5 segundos antes de verificar nuevamente
@@ -377,7 +375,6 @@ void logMessageToFile(int consumer_id, Message *msg) {
 
     pthread_mutex_unlock(&log_mutex);
 }
-
 void sendMessageConsumers(Message *original_msg) {
     // Recorrer todos los grupos
     pthread_mutex_lock(&consumerGroups->mutex);
@@ -410,62 +407,21 @@ void sendMessageConsumers(Message *original_msg) {
             int total = group->count;
             int idx = group->consumer_index;
 
-            while (!message_sent && attempts < total) {
-                if (group->count == 0) break;  // Evita división por 0
+            while (attempts < total) {
                 Consumer *consumer = group->consumers[idx];
-                int fd = consumer->socket_fd;
-
-                // Enviar mensaje
-                uint8_t *buf = (uint8_t*)msg;
-                size_t left = sizeof(Message);
-                ssize_t sent;
-                while (left > 0) {
-                    sent = send(fd, buf, left, MSG_NOSIGNAL);
-                    if (sent <= 0) break;
-                    buf += sent;
-                    left -= sent;
-                }
-
-                if (sent <= 0) {
-                    deleteConsumer(consumerGroups, consumer->id);
-                    pthread_mutex_unlock(&group->group_mutex);
-                    attempts++;
-                    idx = (idx + 1) % (group->count > 0 ? group->count : 1);
-                    pthread_mutex_lock(&group->group_mutex);
-                    continue;
-                }
-
-                // Esperar ACK
-                fd_set rfds;
-                struct timeval tv = { .tv_sec = 5, .tv_usec = 0 };
-                FD_ZERO(&rfds);
-                FD_SET(fd, &rfds);
-                int r = select(fd+1, &rfds, NULL, NULL, &tv);
-
-                if (r > 0 && FD_ISSET(fd, &rfds)) {
-                    Message ack;
-                    if (recv(fd, &ack, sizeof(ack), MSG_WAITALL) == sizeof(ack)
-                        && ack.type == MSG_ACK && ack.offset == msg->offset) {
-                        // OK
-                        logMessageToFile(consumer->id, msg);
-                        group->offset_group++;
-                        group->consumer_index = (idx + 1) % group->count;
-                        message_sent = 1;
-                    } else {
-                        deleteConsumer(consumerGroups, consumer->id);
-                        pthread_mutex_unlock(&group->group_mutex);
-                        attempts++;
-                        idx = (idx + 1) % (group->count > 0 ? group->count : 1);
-                        pthread_mutex_lock(&group->group_mutex);
-                    }
+                ssize_t bytes_sent = send(consumer->socket_fd, msg, sizeof(Message), 0);
+                if (bytes_sent > 0) {
+                    printf("Mensaje enviado a Consumer ID: %d\n", consumer->id);
+                    logMessageToFile(consumer->id, msg);
+                    group->offset_group++;
+                    message_sent = 1;
+                    group->consumer_index = (idx + 1) % total; // Actualizar índice del consumidor
+                    break;
                 } else {
-                    if (r < 0) perror("select");
-                    deleteConsumer(consumerGroups, consumer->id);
-                    pthread_mutex_unlock(&group->group_mutex);
-                    attempts++;
-                    idx = (idx + 1) % (group->count > 0 ? group->count : 1);
-                    pthread_mutex_lock(&group->group_mutex);
+                    perror("Error al enviar mensaje al consumidor");
                 }
+                attempts++;
+                idx = (idx + 1) % total; // Rotar al siguiente consumidor
             }
 
             pthread_mutex_unlock(&group->group_mutex);
@@ -475,7 +431,6 @@ void sendMessageConsumers(Message *original_msg) {
         currentNode = currentNode->next;
     }
 }
-
 
 // Funciones de manejo de conexiones
 void *handlerConnProducer(void *arg) {
