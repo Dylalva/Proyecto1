@@ -568,6 +568,95 @@ void *handlerSendMessage(void *arg) {
     return NULL;
 }
 
+// Funciones de manejo de conexiones
+void *handlerConnProducer(void *arg) {
+    int socket_cliente = *(int *)arg;
+    free(arg);
+
+    Message msg;
+    ssize_t bytes_recibidos = recv(socket_cliente, &msg, sizeof(Message), 0);
+
+    if (bytes_recibidos > 0) {
+        pthread_mutex_lock(&mensaje_id_mutex);
+        msg.id = mensaje_id++;
+        pthread_mutex_unlock(&mensaje_id_mutex);
+
+        // Registrar el mensaje en el archivo mensajes.log
+        pthread_mutex_lock(&log_mutex); // Bloquear el mutex antes de escribir en el archivo
+        FILE *log_file = fopen("mensajes.log", "a");
+        if (log_file) {
+            fprintf(log_file, "ID: %d | Origen: %s | Contenido: %s\n", msg.id, msg.origen, msg.mensaje);
+            fclose(log_file);
+        } else {
+            perror("Error al abrir el archivo mensajes.log");
+        }
+        pthread_mutex_unlock(&log_mutex); // Liberar el mutex después de escribir en el archivo
+
+        Message *msg_ptr = malloc(sizeof(Message));
+        if (msg_ptr) {
+            memcpy(msg_ptr, &msg, sizeof(Message));
+            enqueue(cola, msg_ptr);
+
+            printf("\nMensaje recibido de Producer:\n");
+            printf("  ID: %d\n  Origen: %s\n  Contenido: %s\n", msg.id, msg.origen, msg.mensaje);
+            
+            pthread_mutex_lock(&cola_mutex);
+            pthread_cond_signal(&cola_cond); // Avisar al hilo que envía mensajes que hay un nuevo mensaje
+            pthread_mutex_unlock(&cola_mutex);
+            printQueue(cola); // Solo para pruebas
+        } else {
+            perror("No se pudo asignar memoria para el mensaje");
+        }
+    } else {
+        perror("Error al recibir mensaje o conexión cerrada");
+    }
+
+    close(socket_cliente);
+    pthread_exit(NULL);
+}
+
+void *handlerSendMessage(void *arg) {
+    while (1) {
+        pthread_mutex_lock(&cola_mutex);
+
+        // Esperar a que haya mensajes en la cola
+        while (isEmpty(cola)) {
+            printf("Esperando mensajes en la cola...\n");
+            pthread_cond_wait(&cola_cond, &cola_mutex);
+        }
+
+        pthread_mutex_unlock(&cola_mutex);
+
+        // Verificar si hay consumidores disponibles
+        pthread_mutex_lock(&consumerGroups->mutex);
+        int consumers_available = 0;
+        ConsumerGroupNode *currentNode = consumerGroups->head;
+        while (currentNode) {
+            if (currentNode->group->count > 0) {
+                consumers_available = 1;
+                break;
+            }
+            currentNode = currentNode->next;
+        }
+        pthread_mutex_unlock(&consumerGroups->mutex);
+
+        if (!consumers_available) {
+            printf("No hay consumidores disponibles. Esperando...\n");
+            sleep(1); 
+            continue;
+        }
+
+        // Si hay consumidores, procesar el mensaje
+        Message *msg = (Message *)dequeue(cola);
+        
+        if (msg) {
+            sendMessageConsumers(msg);
+            free(msg);
+        }
+    }
+    return NULL;
+}
+
 void *handlerConnConsumer(void *arg) {
     int socket_cliente = *(int *)arg;
     free(arg);
