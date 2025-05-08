@@ -89,6 +89,8 @@ pthread_mutex_t create_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 #define MAX_QUEUE_SIZE 1000 // Límite máximo de mensajes en la cola
 sem_t cola_sem; // Semáforo para controlar el tamaño de la cola
+#define MAX_CONSUMERS 600 // Límite máximo de consumidores
+sem_t consumer_sem;       // Semáforo para controlar el número de consumidores
 ConsumerGroupContainer *consumerGroups;
 
 // --------------------
@@ -569,7 +571,7 @@ void *handlerSendMessage(void *arg) {
 void *handlerConnConsumer(void *arg) {
     int socket_cliente = *(int *)arg;
     free(arg);
-
+    sem_wait(&consumer_sem);
     Consumer *consumer = malloc(sizeof(Consumer));
     pthread_mutex_lock(&consumerGroups->mutex);
     pthread_mutex_lock(&consumer_id_mutex);
@@ -675,6 +677,7 @@ void init_broker() {
 
     cola = initQueue();
     sem_init(&cola_sem, 0, MAX_QUEUE_SIZE);
+    sem_init(&consumer_sem, 0, MAX_CONSUMERS);
     consumerGroups = initConsumerGroupContainer();
 
     // Configurar socket para Producers
@@ -743,6 +746,7 @@ void init_broker() {
 
     freeQueue(cola);
     sem_destroy(&cola_sem);
+    sem_destroy(&consumer_sem);
     close(socket_producers);
     close(socket_consumers);
 }
