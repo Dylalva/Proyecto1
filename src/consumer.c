@@ -260,7 +260,9 @@ void *receiver_thread(void *arg) {
                 size_t left = sizeof(ack);
                 while (left>0) { 
                     ssize_t s = send(fds[0].fd, b, left, MSG_NOSIGNAL); 
-                    if (s<=0) break; b+=s; left-=s; 
+                    if (s<=0) break;
+                    b+=s;
+                    left-=s; 
                 }
             } else if (bytes==0) {
                 printf("Broker desconectado. Intentando reconexion...\n");
